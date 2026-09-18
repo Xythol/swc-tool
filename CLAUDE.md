@@ -81,6 +81,70 @@ OAuth for a browser-only tool means the client-side/implicit flow (no client sec
 which needs an app registered on swcombine.com and a hosted redirect page. Bigger lift
 than anything in Tier 1 — scope that out properly before starting Tier 2.
 
+**Confirmed empirically (2026-09-18): the website's login session cookie does NOT
+authenticate API calls.** Hit `/ws/v2.0/api/helloauth/` and `/ws/v2.0/character/`
+directly from the user's logged-in browser with no `access_token` — both returned
+`403 Access Token Not Provided`. The API and the website session are separate auth
+domains by design; there is no shortcut through "already being logged in."
+
+**App registration** is self-service, no approval wait observed: start at
+`https://www.swcombine.com/ws/registration/` (Step 1 is just an App Name — linked
+account is auto-filled from whoever registers it). Authorized apps and their live
+tokens are manageable/revocable at
+`https://www.swcombine.com/members/actsettings/index.php?mode=ws` ("Web Services" tab
+under Account Settings) — this page is also how to inspect exactly what scopes an
+app actually holds.
+
+**Important architecture finding**: `client_id` is not secret — safe to hardcode
+directly in the userscript source (checked into this repo), so it ships to every
+device automatically via the existing `@updateURL` mechanism, no per-device setup.
+But the *token lifecycle* has a real fork, confirmed by inspecting the user's own
+token list on the Web Services settings page:
+
+- **The Forge holds both an Access Token AND a Refresh Token** for this user. Per
+  SWC's own OAuth docs, refresh tokens are only issued via the **authorization-code**
+  flow (server-side) — the **client-side/implicit** flow (`response_type=token`,
+  the only flow a pure browser userscript can do without exposing a secret) has no
+  refresh token in its response at all. This means The Forge runs its own backend
+  that holds a `client_secret` and refreshes tokens silently forever, without ever
+  re-prompting the user.
+- A pure Tampermonkey userscript **cannot replicate that** — implicit-flow access
+  tokens expire (lifetime returned as `expires_in` on issuance, actual value for
+  this API not yet confirmed) and there is no secret-free way to mint a new one
+  without redirecting the user through `/ws/oauth2/auth/` again. SWC's docs mention
+  a `renew_previously_granted=yes` param that may allow a silent-ish re-grant if the
+  site session is still active and the same scopes were already approved — untested,
+  worth verifying empirically before relying on it.
+- **Decision point for whoever builds Tier 2**: accept periodic "reconnect" friction
+  (pure client-side implicit flow, no new infrastructure, consistent with this repo
+  being "just a userscript" so far) vs. build a small hosted backend to hold a
+  `client_secret` and do silent refresh like The Forge (meaningfully bigger lift —
+  closer to Tier 3 in scope, needs somewhere to run and to store the refresh token
+  server-side, never in client JS).
+- **Decided (2026-09-18)**: going with the pure client-side/implicit flow, occasional
+  reconnect prompts accepted. No backend.
+
+### OAuth redirect page (GitHub Pages)
+
+`oauth-callback.html` at the repo root is the OAuth app's `redirect_uri` target,
+served via GitHub Pages: **https://xythol.github.io/swc-tool/oauth-callback.html**
+(Pages enabled 2026-09-18 via `gh api repos/Xythol/swc-tool/pages`, source =
+`master` branch root — takes a minute to start serving after first enabling).
+
+It's a plain static page with **no Tampermonkey dependency** — it doesn't need to be
+in the userscript's `@match` list. Mechanism: the "Connect" button in the overlay
+opens the SWC auth URL in a `window.open()` popup (not a full-page redirect) and
+keeps a reference to it; SWC redirects that popup to this page with
+`#access_token=...&expires_in=...` in the fragment; the page parses the fragment
+client-side (fragments never hit a server) and calls
+`window.opener.postMessage({ source: 'swc-tool-oauth', access_token, expires_in }, '*')`
+before closing itself. The main content script listens for that `message` event on
+the game tab, verifies `event.source` is the popup it opened, and stores the token
+(+ computed expiry) via `GM_setValue`. Handles the `error=access_denied` case too.
+
+When registering the app at `https://www.swcombine.com/ws/registration/`, use the
+Pages URL above as the redirect URI.
+
 ### Prior art — check before building anything new
 
 **The Forge** (https://swc-forge.com) is a third-party community tool platform the
