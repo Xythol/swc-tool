@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.2.2
-// @description  Bookmark space systems in Star Wars Combine and jump back to them with one click.
+// @version      1.3.0
+// @description  Bookmark space systems in Star Wars Combine and track XP/hour + time to next level.
 // @author       you
 // @match        *://*.swcombine.com/*
 // @grant        GM_setValue
@@ -19,11 +19,13 @@
 
     var STORAGE_KEY = 'swc_system_bookmarks';
     var PANEL_OPEN_KEY = 'swc_panel_open';
-    var OAUTH_TOKEN_KEY = 'swc_oauth_token';
 
-    var OAUTH_CLIENT_ID = 'fccda0a63979711c8d1138da34ac30b38576be36';
-    var OAUTH_REDIRECT_URI = 'https://xythol.github.io/swc-tool/oauth-callback.html';
-    var OAUTH_SCOPES = ['personal_inv_overview', 'personal_inv_npcs_read', 'personal_inv_droids_read'];
+    var XP_SAMPLES_KEY = 'swc_xp_samples';
+    var XP_NEXT_KEY = 'swc_xp_next';
+    var XP_LAST_FETCH_KEY = 'swc_xp_last_fetch';
+    var XP_SAMPLE_INTERVAL_MS = 2 * 60 * 1000; // don't background-sample more often than this
+    var XP_WINDOW_MS = 4 * 60 * 60 * 1000; // rate is computed over the last 4 hours of samples
+    var XP_MAX_SAMPLES = 200;
 
     // ---------- storage ----------
 
@@ -49,215 +51,91 @@
         GM_setValue(PANEL_OPEN_KEY, open);
     }
 
-    // ---------- OAuth ----------
+    // ---------- XP tracking ----------
 
-    function getOAuthToken() {
-        var raw = GM_getValue(OAUTH_TOKEN_KEY, '');
-        if (!raw) return null;
-        try {
-            var token = JSON.parse(raw);
-            if (!token || !token.access_token || !token.expires_at) return null;
-            if (Date.now() >= token.expires_at) return null;
-            return token;
-        } catch (e) {
-            return null;
-        }
-    }
-
-    function saveOAuthToken(accessToken, expiresIn) {
-        var ttlMs = (expiresIn ? expiresIn * 1000 : 60 * 60 * 1000) - 30000;
-        var token = { access_token: accessToken, expires_at: Date.now() + Math.max(ttlMs, 0) };
-        GM_setValue(OAUTH_TOKEN_KEY, JSON.stringify(token));
-    }
-
-    function clearOAuthToken() {
-        GM_setValue(OAUTH_TOKEN_KEY, '');
-    }
-
-    function connectOAuth(onDone) {
-        var authUrl = 'https://www.swcombine.com/ws/oauth2/auth/?' +
-            'response_type=token' +
-            '&client_id=' + encodeURIComponent(OAUTH_CLIENT_ID) +
-            '&redirect_uri=' + encodeURIComponent(OAUTH_REDIRECT_URI) +
-            '&scope=' + encodeURIComponent(OAUTH_SCOPES.join(' '));
-
-        var popup = window.open(authUrl, 'swc_oauth_popup', 'width=600,height=700');
-        if (!popup) {
-            onDone(false, 'popup_blocked');
-            return;
-        }
-
-        var settled = false;
-
-        function finish(success, error) {
-            if (settled) return;
-            settled = true;
-            window.removeEventListener('message', onMessage);
-            clearInterval(closeCheck);
-            onDone(success, error || null);
-        }
-
-        function onMessage(event) {
-            if (event.source !== popup) return;
-            var data = event.data;
-            if (!data || data.source !== 'swc-tool-oauth') return;
-            if (data.error) {
-                finish(false, data.error);
-                return;
-            }
-            saveOAuthToken(data.access_token, data.expires_in);
-            finish(true, null);
-        }
-        window.addEventListener('message', onMessage);
-
-        var closeCheck = setInterval(function () {
-            if (popup.closed) finish(false, 'closed');
-        }, 500);
-    }
-
-    // ---------- NPC roster ----------
-
-    var ROSTER_KEY = 'swc_npc_roster';
-
-    function getCharacterHandle() {
-        var el = document.getElementById('alertbarhandle');
-        return el ? el.textContent.trim() : null;
-    }
-
-    function saveRoster(entities) {
-        GM_setValue(ROSTER_KEY, JSON.stringify({ fetchedAt: Date.now(), entities: entities }));
-    }
-
-    function getRoster() {
-        var raw = GM_getValue(ROSTER_KEY, '');
-        if (!raw) return null;
-        try {
-            return JSON.parse(raw);
-        } catch (e) {
-            return null;
-        }
-    }
-
-    function apiGet(url, token, onDone) {
-        console.log('[SWC Tool] GET', url);
-        fetch(url, {
-            headers: { Authorization: 'OAuth ' + token },
-            credentials: 'include'
-        }).then(function (response) {
-            return response.text().then(function (text) {
-                console.log('[SWC Tool] response', response.status, url, '\n', text.slice(0, 500));
-                if (response.status >= 200 && response.status < 300) {
-                    onDone(null, text);
-                } else {
-                    onDone({ status: response.status }, null);
-                }
-            });
-        }).catch(function (err) {
-            console.error('[SWC Tool] fetch error', url, err);
-            onDone({ status: 0 }, null);
-        });
-    }
-
-    function parseEntities(xmlText, kind) {
-        var doc = new DOMParser().parseFromString(xmlText, 'application/xml');
-        return Array.from(doc.querySelectorAll('entity')).map(function (e) {
-            function text(sel) {
-                var el = e.querySelector(sel);
-                return el ? el.textContent : '';
-            }
-            var container = e.querySelector('location > container');
-            var hpEl = e.querySelector('hp');
-            var hullEl = e.querySelector('hull');
-            var typeEl = e.querySelector('type');
-            var wreckedEl = e.querySelector('wrecked');
-            return {
-                kind: kind,
-                uid: text('uid'),
-                name: text('name'),
-                roleType: typeEl ? typeEl.textContent : '',
-                level: text('level'),
-                location: container ? container.textContent : '',
-                hpCurrent: hpEl ? hpEl.textContent : (hullEl ? hullEl.textContent : null),
-                hpMax: hpEl ? hpEl.getAttribute('max') : (hullEl ? hullEl.getAttribute('max') : null),
-                wrecked: wreckedEl ? wreckedEl.textContent === 'yes' : false
-            };
-        });
-    }
-
-    function fetchRoster(onDone) {
-        var token = getOAuthToken();
-        if (!token) {
-            console.warn('[SWC Tool] fetchRoster: not connected');
-            onDone('not_connected');
-            return;
-        }
-
-        var handle = getCharacterHandle();
-        if (!handle) {
-            console.warn('[SWC Tool] fetchRoster: could not find #alertbarhandle on this page');
-            onDone('no_handle');
-            return;
-        }
-        console.log('[SWC Tool] fetchRoster: handle =', handle);
-
-        var invUrl = 'https://www.swcombine.com/ws/v2.0/inventory/' + encodeURIComponent(handle) + '/';
-        apiGet(invUrl, token.access_token, function (err, text) {
-            if (err) {
-                console.error('[SWC Tool] fetchRoster: inventory list request failed', err);
-                if (err.status === 401 || err.status === 403) clearOAuthToken();
-                onDone('fetch_failed');
-                return;
-            }
-
-            var doc = new DOMParser().parseFromString(text, 'application/xml');
-            var npcOwner = doc.querySelector('inventory[type="npc"] > owner');
-            var droidOwner = doc.querySelector('inventory[type="droid"] > owner');
-            console.log('[SWC Tool] fetchRoster: npcOwner href =', npcOwner && npcOwner.getAttribute('href'), 'droidOwner href =', droidOwner && droidOwner.getAttribute('href'));
-
-            if (!npcOwner && !droidOwner) {
-                console.warn('[SWC Tool] fetchRoster: no npc/droid inventory role found in response');
-                onDone('no_npc_or_droid');
-                return;
-            }
-
-            var results = [];
-            var pending = 0;
-            var hadError = false;
-
-            function maybeFinish() {
-                pending--;
-                if (pending > 0) return;
-                if (hadError) {
-                    onDone('fetch_failed');
+    // The XP figure only appears in the #menu_CurXP widget on /members/* pages,
+    // not on system pages where this panel actually lives - so instead of
+    // scraping the current page, we fetch /members/ in the background
+    // (same-origin fetch(), which passes Anubis fine - GM_xmlhttpRequest does not,
+    // see CLAUDE.md) and parse the XP out of that response.
+    function fetchCurrentXP(onDone) {
+        fetch(location.origin + '/members/', { credentials: 'include' })
+            .then(function (res) { return res.text(); })
+            .then(function (html) {
+                var doc = new DOMParser().parseFromString(html, 'text/html');
+                var curEl = doc.getElementById('menu_CurXP');
+                if (!curEl) {
+                    onDone(null);
                     return;
                 }
-                saveRoster(results);
-                onDone(null, results);
-            }
+                var current = parseInt(curEl.textContent.replace(/,/g, ''), 10);
+                if (isNaN(current)) {
+                    onDone(null);
+                    return;
+                }
+                // The "Next: N" figure is rendered client-side by a Vue component and
+                // isn't in the static DOM, but it IS present as a static attribute on
+                // that component's tag before Vue hydrates it - so pull it from the
+                // raw HTML rather than the parsed document.
+                var next = null;
+                var bars = html.match(/<coloured-status-bar2\b[^>]*>/gi) || [];
+                var xpBar = bars.filter(function (tag) { return /unit="XP"/i.test(tag); })[0];
+                if (xpBar) {
+                    var m = xpBar.match(/title="Next:\s*([\d,]+)"/i);
+                    if (m) next = parseInt(m[1].replace(/,/g, ''), 10);
+                }
+                onDone({ current: current, next: next });
+            })
+            .catch(function () { onDone(null); });
+    }
 
-            if (npcOwner) {
-                pending++;
-                apiGet(npcOwner.getAttribute('href'), token.access_token, function (err2, text2) {
-                    if (err2) {
-                        hadError = true;
-                    } else {
-                        results = results.concat(parseEntities(text2, 'npc'));
-                    }
-                    maybeFinish();
-                });
-            }
-            if (droidOwner) {
-                pending++;
-                apiGet(droidOwner.getAttribute('href'), token.access_token, function (err2, text2) {
-                    if (err2) {
-                        hadError = true;
-                    } else {
-                        results = results.concat(parseEntities(text2, 'droid'));
-                    }
-                    maybeFinish();
-                });
-            }
+    function getXPSamples() {
+        var raw = GM_getValue(XP_SAMPLES_KEY, '[]');
+        try {
+            var list = JSON.parse(raw);
+            return Array.isArray(list) ? list : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    function addXPSample(xp) {
+        var samples = getXPSamples();
+        samples.push({ t: Date.now(), xp: xp });
+        var cutoff = Date.now() - XP_WINDOW_MS;
+        samples = samples.filter(function (s) { return s.t >= cutoff; });
+        if (samples.length > XP_MAX_SAMPLES) samples = samples.slice(samples.length - XP_MAX_SAMPLES);
+        GM_setValue(XP_SAMPLES_KEY, JSON.stringify(samples));
+    }
+
+    function recordXPReading(info) {
+        addXPSample(info.current);
+        GM_setValue(XP_NEXT_KEY, info.next == null ? '' : String(info.next));
+    }
+
+    function maybeSampleXP(onDone) {
+        var lastFetch = GM_getValue(XP_LAST_FETCH_KEY, 0);
+        if (Date.now() - lastFetch < XP_SAMPLE_INTERVAL_MS) {
+            if (onDone) onDone(false);
+            return;
+        }
+        GM_setValue(XP_LAST_FETCH_KEY, Date.now());
+        fetchCurrentXP(function (info) {
+            if (info) recordXPReading(info);
+            if (onDone) onDone(!!info);
         });
+    }
+
+    function formatDuration(hours) {
+        var totalMinutes = Math.round(hours * 60);
+        var days = Math.floor(totalMinutes / 1440);
+        var hrs = Math.floor((totalMinutes % 1440) / 60);
+        var mins = totalMinutes % 60;
+        var parts = [];
+        if (days > 0) parts.push(days + 'd');
+        if (hrs > 0) parts.push(hrs + 'h');
+        if (days === 0 && mins > 0) parts.push(mins + 'm');
+        return parts.length ? parts.join(' ') : '0m';
     }
 
     // ---------- current system detection ----------
@@ -311,11 +189,11 @@
         '}',
         '.swc-bm-btn:hover { background: #3a3f4b; }',
         '.swc-bm-btn:disabled { opacity: 0.5; cursor: default; }',
-        '#swc-bm-list, #swc-bm-roster-list { list-style: none; margin: 0; padding: 0; }',
-        '#swc-bm-list li, #swc-bm-roster-list li {',
+        '#swc-bm-list { list-style: none; margin: 0; padding: 0; }',
+        '#swc-bm-list li {',
         '  padding: 8px 12px; border-bottom: 1px solid #2a2e37; display: flex; flex-direction: column; gap: 4px;',
         '}',
-        '#swc-bm-list li:last-child, #swc-bm-roster-list li:last-child { border-bottom: none; }',
+        '#swc-bm-list li:last-child { border-bottom: none; }',
         '.swc-bm-row-top { display: flex; align-items: center; justify-content: space-between; gap: 6px; }',
         '.swc-bm-link { color: #6cb4ff; text-decoration: none; font-weight: bold; }',
         '.swc-bm-link:hover { text-decoration: underline; }',
@@ -327,174 +205,98 @@
         '  border: 1px solid #3a3f4b; border-radius: 4px; padding: 3px 6px; font-size: 12px;',
         '}',
         '.swc-bm-empty { padding: 12px; color: #999; font-style: italic; }',
-        '#swc-bm-oauth {',
-        '  padding: 10px 12px; border-bottom: 1px solid #3a3f4b;',
-        '  display: flex; flex-direction: column; gap: 6px;',
-        '}',
-        '.swc-bm-oauth-row {',
-        '  display: flex; align-items: center; gap: 6px;',
-        '}',
-        '.swc-bm-oauth-row .swc-bm-hint { flex: 1; }',
-        '#swc-bm-roster { padding-bottom: 4px; }',
-        '#swc-bm-roster .swc-bm-oauth-row { padding: 10px 12px 6px; }',
-        '.swc-bm-roster-name { font-weight: bold; }',
-        '.swc-bm-oauth-row input.swc-bm-note { flex: 1; }',
+        '#swc-bm-xp { padding: 10px 12px; border-top: 1px solid #3a3f4b; display: flex; flex-direction: column; gap: 4px; }',
+        '.swc-bm-row { display: flex; align-items: center; gap: 6px; }',
+        '.swc-bm-row .swc-bm-hint { flex: 1; }',
+        '.swc-bm-xp-header { font-weight: bold; color: #f2c94c; }',
     ].join('\n'));
 
     // ---------- rendering ----------
 
-    var panel, list, currentBox, toggleBtn, oauthBox, rosterBox;
+    var panel, list, currentBox, toggleBtn, xpBox;
 
     function render() {
         renderCurrent();
         renderList();
-        renderOAuth();
-        renderRoster();
+        renderXP();
     }
 
-    function renderRoster() {
-        rosterBox.innerHTML = '';
+    function renderXP() {
+        xpBox.innerHTML = '';
 
-        var token = getOAuthToken();
-        var cached = getRoster();
+        var headerRow = document.createElement('div');
+        headerRow.className = 'swc-bm-row';
 
         var header = document.createElement('div');
-        header.className = 'swc-bm-oauth-row';
+        header.className = 'swc-bm-xp-header';
+        header.textContent = 'XP Tracker';
+        headerRow.appendChild(header);
 
-        var title = document.createElement('div');
-        title.className = 'swc-bm-hint';
-        title.textContent = 'NPC Roster' + (cached ? ' (' + cached.entities.length + ')' : '');
-        header.appendChild(title);
-
-        if (token) {
-            var refreshBtn = document.createElement('button');
-            refreshBtn.className = 'swc-bm-btn';
-            refreshBtn.textContent = 'Refresh';
-            refreshBtn.addEventListener('click', function () {
-                refreshBtn.disabled = true;
-                refreshBtn.textContent = 'Loading…';
-                fetchRoster(function (err) {
-                    if (err) {
-                        title.textContent = 'NPC Roster: error (' + err + ')';
-                        refreshBtn.disabled = false;
-                        refreshBtn.textContent = 'Refresh';
-                        return;
-                    }
-                    renderRoster();
-                });
+        var sampleBtn = document.createElement('button');
+        sampleBtn.className = 'swc-bm-btn';
+        sampleBtn.textContent = 'Sample now';
+        sampleBtn.addEventListener('click', function () {
+            sampleBtn.disabled = true;
+            fetchCurrentXP(function (info) {
+                sampleBtn.disabled = false;
+                if (info) {
+                    recordXPReading(info);
+                    GM_setValue(XP_LAST_FETCH_KEY, Date.now());
+                }
+                renderXP();
             });
-            header.appendChild(refreshBtn);
-        }
+        });
+        headerRow.appendChild(sampleBtn);
+        xpBox.appendChild(headerRow);
 
-        rosterBox.appendChild(header);
-
-        if (!token) {
+        var samples = getXPSamples();
+        if (samples.length === 0) {
             var hint = document.createElement('div');
-            hint.className = 'swc-bm-empty';
-            hint.textContent = 'Connect above to load your NPCs and droids.';
-            rosterBox.appendChild(hint);
+            hint.className = 'swc-bm-hint';
+            hint.textContent = 'No data yet — click Sample now, or just keep playing.';
+            xpBox.appendChild(hint);
             return;
         }
 
-        if (!cached || cached.entities.length === 0) {
-            var empty = document.createElement('div');
-            empty.className = 'swc-bm-empty';
-            empty.textContent = 'No data yet — click Refresh.';
-            rosterBox.appendChild(empty);
+        var latest = samples[samples.length - 1];
+        var nextRaw = GM_getValue(XP_NEXT_KEY, '');
+        var next = nextRaw ? parseInt(nextRaw, 10) : null;
+
+        var curLine = document.createElement('div');
+        curLine.className = 'swc-bm-hint';
+        curLine.textContent = 'XP: ' + latest.xp.toLocaleString() + (next != null ? ' / ' + next.toLocaleString() : '');
+        xpBox.appendChild(curLine);
+
+        if (samples.length < 2) {
+            var hint2 = document.createElement('div');
+            hint2.className = 'swc-bm-hint';
+            hint2.textContent = 'Rate: gathering data…';
+            xpBox.appendChild(hint2);
             return;
         }
 
-        var ul = document.createElement('ul');
-        ul.id = 'swc-bm-roster-list';
-        cached.entities.forEach(function (ent) {
-            var li = document.createElement('li');
+        var oldest = samples[0];
+        var hours = (latest.t - oldest.t) / 3600000;
+        var rate = hours > 0 ? (latest.xp - oldest.xp) / hours : 0;
 
-            var top = document.createElement('div');
-            top.className = 'swc-bm-row-top';
+        var rateLine = document.createElement('div');
+        rateLine.className = 'swc-bm-hint';
+        rateLine.textContent = 'XP/hour: ~' + Math.round(rate).toLocaleString();
+        xpBox.appendChild(rateLine);
 
-            var name = document.createElement('span');
-            name.className = 'swc-bm-roster-name';
-            name.textContent = (ent.kind === 'droid' ? '⚙ ' : '') + ent.name;
-            top.appendChild(name);
-
-            var hp = document.createElement('span');
-            hp.className = 'swc-bm-hint';
-            hp.textContent = ent.wrecked ? 'wrecked' : (ent.hpCurrent + '/' + ent.hpMax + ' HP');
-            top.appendChild(hp);
-
-            li.appendChild(top);
-
-            var sub = document.createElement('div');
-            sub.className = 'swc-bm-hint';
-            sub.textContent = (ent.roleType ? ent.roleType + ' · ' : '') + (ent.location || 'unknown location');
-            li.appendChild(sub);
-
-            ul.appendChild(li);
-        });
-        rosterBox.appendChild(ul);
-    }
-
-    function renderOAuth() {
-        oauthBox.innerHTML = '';
-
-        var statusRow = document.createElement('div');
-        statusRow.className = 'swc-bm-oauth-row';
-
-        var hint = document.createElement('div');
-        hint.className = 'swc-bm-hint';
-
-        var btn = document.createElement('button');
-        btn.className = 'swc-bm-btn';
-
-        var token = getOAuthToken();
-        if (token) {
-            var minsLeft = Math.max(0, Math.round((token.expires_at - Date.now()) / 60000));
-            hint.textContent = 'NPC Roster: connected (~' + minsLeft + 'm left)';
-            btn.textContent = 'Disconnect';
-            btn.addEventListener('click', function () {
-                clearOAuthToken();
-                renderOAuth();
-            });
-        } else {
-            hint.textContent = 'NPC Roster: not connected';
-            btn.textContent = 'Connect';
-            btn.addEventListener('click', function () {
-                btn.disabled = true;
-                btn.textContent = 'Waiting…';
-                connectOAuth(function (success, error) {
-                    if (!success && error && error !== 'closed') {
-                        hint.textContent = 'NPC Roster: connection failed (' + error + ')';
-                    }
-                    renderOAuth();
-                });
-            });
+        if (next != null) {
+            var remaining = next - latest.xp;
+            var etaLine = document.createElement('div');
+            etaLine.className = 'swc-bm-hint';
+            if (remaining <= 0) {
+                etaLine.textContent = 'Ready to level up!';
+            } else if (rate <= 0) {
+                etaLine.textContent = 'Time to next level: unknown (no recent XP gain)';
+            } else {
+                etaLine.textContent = 'Time to next level: ~' + formatDuration(remaining / rate);
+            }
+            xpBox.appendChild(etaLine);
         }
-
-        statusRow.appendChild(hint);
-        statusRow.appendChild(btn);
-        oauthBox.appendChild(statusRow);
-
-        var pasteRow = document.createElement('div');
-        pasteRow.className = 'swc-bm-oauth-row';
-
-        var pasteInput = document.createElement('input');
-        pasteInput.type = 'text';
-        pasteInput.className = 'swc-bm-note';
-        pasteInput.placeholder = 'Or paste a Test Token…';
-
-        var useBtn = document.createElement('button');
-        useBtn.className = 'swc-bm-btn';
-        useBtn.textContent = 'Use';
-        useBtn.addEventListener('click', function () {
-            var value = pasteInput.value.trim();
-            if (!value) return;
-            saveOAuthToken(value, 60 * 60); // Test Tokens always last 1 hour
-            renderOAuth();
-        });
-
-        pasteRow.appendChild(pasteInput);
-        pasteRow.appendChild(useBtn);
-        oauthBox.appendChild(pasteRow);
     }
 
     function renderCurrent() {
@@ -617,13 +419,9 @@
         list.id = 'swc-bm-list';
         panel.appendChild(list);
 
-        oauthBox = document.createElement('div');
-        oauthBox.id = 'swc-bm-oauth';
-        panel.appendChild(oauthBox);
-
-        rosterBox = document.createElement('div');
-        rosterBox.id = 'swc-bm-roster';
-        panel.appendChild(rosterBox);
+        xpBox = document.createElement('div');
+        xpBox.id = 'swc-bm-xp';
+        panel.appendChild(xpBox);
 
         document.body.appendChild(panel);
 
@@ -640,6 +438,9 @@
         });
 
         render();
+        maybeSampleXP(function (sampled) {
+            if (sampled) render();
+        });
     }
 
     buildPanel();
