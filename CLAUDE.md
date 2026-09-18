@@ -145,6 +145,47 @@ the game tab, verifies `event.source` is the popup it opened, and stores the tok
 When registering the app at `https://www.swcombine.com/ws/registration/`, use the
 Pages URL above as the redirect URI.
 
+### Registered app: "SWC Tool" — blocked on "Active: No"
+
+Registered 2026-09-18, id 281. `Client ID` = `fccda0a63979711c8d1138da34ac30b38576be36`
+(this is the value embedded as `OAUTH_CLIENT_ID` in the userscript — confirmed
+against the account settings page, not a guess). `Client Secret` exists but is
+intentionally unused/never embedded anywhere, per the "no backend" decision above.
+
+**The real popup-based OAuth flow does not work yet.** Hitting
+`/ws/oauth2/auth/` with this client_id returns `<error>access_denied_inactive_client</error>`.
+The app's edit page (`/members/actsettings/clients_edit.php?id=281`) shows
+`Active: No` as a plain read-only label — no self-service toggle found anywhere in
+the UI. Likely needs manual/staff-side approval (unconfirmed — the
+`www.swcombine.com/ws/developers/` hub 403'd when checked for an FAQ on this, and
+`#swc-dev` on IRC was the only dev-contact channel found via the `swc-core` repo
+README). **Next time this comes up: check if it's since flipped to Active, and if
+not, consider asking in the game/Discord/IRC what activates a client.**
+
+**Workaround that works today: Test Tokens.** Account Settings → Web Services →
+the app's "Test Token" action
+(`/members/actsettings/index.php?mode=wstesttoken&id=281`) lets the account owner
+self-generate a scoped access token directly, no "Active" requirement, via a
+checkbox list of the same 173 permissions. Constraint: **expires in 1 hour, no
+refresh** — must be manually regenerated and re-entered each time. Useful for
+developing/testing the Inventory API calls right now regardless of activation
+status, and may end up being the permanent mechanism if activation turns out to be
+gated behind something out of reach (e.g. requires being a known/trusted developer).
+
+Minimal scope set for the NPC roster feature (tick only these on the Test Token
+page — everything else, especially any `*_write`/`*_rename`/`*_assign` box, is
+unnecessary for a read-only dashboard): `personal_inv_overview`,
+`personal_inv_npcs_read`, `personal_inv_droids_read`. Matches `OAUTH_SCOPES` in the
+userscript exactly.
+
+**Implemented (2026-09-18)**: the overlay's "NPC Roster" section has two ways to
+get a token — the popup Connect button (non-functional until the app is Active),
+and a plain paste-a-token input next to it that accepts a Test Token and stores it
+via `saveOAuthToken(value, 3600)` (hardcoded 1-hour TTL, since that's fixed for
+Test Tokens). No actual Inventory API call wired up yet — this is auth plumbing
+only. Next step: confirm the exact Inventory/NPC/Droid request shape via Chrome,
+then build the fetch + render.
+
 ### Prior art — check before building anything new
 
 **The Forge** (https://swc-forge.com) is a third-party community tool platform the
