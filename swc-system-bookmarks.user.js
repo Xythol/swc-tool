@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.0.1
+// @version      1.1.0
 // @description  Bookmark space systems in Star Wars Combine and jump back to them with one click.
 // @author       you
 // @match        *://*.swcombine.com/*
@@ -19,6 +19,11 @@
 
     var STORAGE_KEY = 'swc_system_bookmarks';
     var PANEL_OPEN_KEY = 'swc_panel_open';
+    var OAUTH_TOKEN_KEY = 'swc_oauth_token';
+
+    var OAUTH_CLIENT_ID = 'fccda0a63979711c8d1138da34ac30b38576be36';
+    var OAUTH_REDIRECT_URI = 'https://xythol.github.io/swc-tool/oauth-callback.html';
+    var OAUTH_SCOPES = ['personal_inv_overview', 'personal_inv_npcs_read', 'personal_inv_droids_read'];
 
     // ---------- storage ----------
 
@@ -42,6 +47,72 @@
 
     function setPanelOpen(open) {
         GM_setValue(PANEL_OPEN_KEY, open);
+    }
+
+    // ---------- OAuth ----------
+
+    function getOAuthToken() {
+        var raw = GM_getValue(OAUTH_TOKEN_KEY, '');
+        if (!raw) return null;
+        try {
+            var token = JSON.parse(raw);
+            if (!token || !token.access_token || !token.expires_at) return null;
+            if (Date.now() >= token.expires_at) return null;
+            return token;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    function saveOAuthToken(accessToken, expiresIn) {
+        var ttlMs = (expiresIn ? expiresIn * 1000 : 60 * 60 * 1000) - 30000;
+        var token = { access_token: accessToken, expires_at: Date.now() + Math.max(ttlMs, 0) };
+        GM_setValue(OAUTH_TOKEN_KEY, JSON.stringify(token));
+    }
+
+    function clearOAuthToken() {
+        GM_setValue(OAUTH_TOKEN_KEY, '');
+    }
+
+    function connectOAuth(onDone) {
+        var authUrl = 'https://www.swcombine.com/ws/oauth2/auth/?' +
+            'response_type=token' +
+            '&client_id=' + encodeURIComponent(OAUTH_CLIENT_ID) +
+            '&redirect_uri=' + encodeURIComponent(OAUTH_REDIRECT_URI) +
+            '&scope=' + encodeURIComponent(OAUTH_SCOPES.join(' '));
+
+        var popup = window.open(authUrl, 'swc_oauth_popup', 'width=600,height=700');
+        if (!popup) {
+            onDone(false, 'popup_blocked');
+            return;
+        }
+
+        var settled = false;
+
+        function finish(success, error) {
+            if (settled) return;
+            settled = true;
+            window.removeEventListener('message', onMessage);
+            clearInterval(closeCheck);
+            onDone(success, error || null);
+        }
+
+        function onMessage(event) {
+            if (event.source !== popup) return;
+            var data = event.data;
+            if (!data || data.source !== 'swc-tool-oauth') return;
+            if (data.error) {
+                finish(false, data.error);
+                return;
+            }
+            saveOAuthToken(data.access_token, data.expires_in);
+            finish(true, null);
+        }
+        window.addEventListener('message', onMessage);
+
+        var closeCheck = setInterval(function () {
+            if (popup.closed) finish(false, 'closed');
+        }, 500);
     }
 
     // ---------- current system detection ----------
@@ -111,15 +182,58 @@
         '  border: 1px solid #3a3f4b; border-radius: 4px; padding: 3px 6px; font-size: 12px;',
         '}',
         '.swc-bm-empty { padding: 12px; color: #999; font-style: italic; }',
+        '#swc-bm-oauth {',
+        '  padding: 10px 12px; border-bottom: 1px solid #3a3f4b;',
+        '  display: flex; align-items: center; justify-content: space-between; gap: 8px;',
+        '}',
+        '#swc-bm-oauth .swc-bm-hint { flex: 1; }',
     ].join('\n'));
 
     // ---------- rendering ----------
 
-    var panel, list, currentBox, toggleBtn;
+    var panel, list, currentBox, toggleBtn, oauthBox;
 
     function render() {
         renderCurrent();
         renderList();
+        renderOAuth();
+    }
+
+    function renderOAuth() {
+        oauthBox.innerHTML = '';
+
+        var hint = document.createElement('div');
+        hint.className = 'swc-bm-hint';
+
+        var btn = document.createElement('button');
+        btn.className = 'swc-bm-btn';
+
+        var token = getOAuthToken();
+        if (token) {
+            var minsLeft = Math.max(0, Math.round((token.expires_at - Date.now()) / 60000));
+            hint.textContent = 'NPC Roster: connected (~' + minsLeft + 'm left)';
+            btn.textContent = 'Disconnect';
+            btn.addEventListener('click', function () {
+                clearOAuthToken();
+                renderOAuth();
+            });
+        } else {
+            hint.textContent = 'NPC Roster: not connected';
+            btn.textContent = 'Connect';
+            btn.addEventListener('click', function () {
+                btn.disabled = true;
+                btn.textContent = 'Waiting…';
+                connectOAuth(function (success, error) {
+                    if (!success && error && error !== 'closed') {
+                        hint.textContent = 'NPC Roster: connection failed (' + error + ')';
+                    }
+                    renderOAuth();
+                });
+            });
+        }
+
+        oauthBox.appendChild(hint);
+        oauthBox.appendChild(btn);
     }
 
     function renderCurrent() {
@@ -241,6 +355,10 @@
         list = document.createElement('ul');
         list.id = 'swc-bm-list';
         panel.appendChild(list);
+
+        oauthBox = document.createElement('div');
+        oauthBox.id = 'swc-bm-oauth';
+        panel.appendChild(oauthBox);
 
         document.body.appendChild(panel);
 
