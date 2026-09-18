@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SWC Tool — Connecting…</title>
+<style>
+  body {
+    background: #12141a; color: #e8e8e8; font: 15px/1.5 sans-serif;
+    display: flex; align-items: center; justify-content: center;
+    height: 100vh; margin: 0; text-align: center;
+  }
+  #box { max-width: 420px; padding: 24px; }
+  h1 { font-size: 18px; color: #f2c94c; margin: 0 0 12px; }
+  p { color: #ccc; }
+  .error { color: #d9534f; }
+</style>
+</head>
+<body>
+<div id="box">
+  <h1 id="title">Connecting…</h1>
+  <p id="message">Completing SWC Tool authorization.</p>
+</div>
+<script>
+(function () {
+  var titleEl = document.getElementById('title');
+  var msgEl = document.getElementById('message');
+
+  function show(title, message, isError) {
+    titleEl.textContent = title;
+    msgEl.textContent = message;
+    if (isError) msgEl.className = 'error';
+  }
+
+  var params = {};
+  var hash = location.hash.replace(/^#/, '');
+  hash.split('&').forEach(function (pair) {
+    if (!pair) return;
+    var idx = pair.indexOf('=');
+    var key = decodeURIComponent(idx === -1 ? pair : pair.slice(0, idx));
+    var val = decodeURIComponent(idx === -1 ? '' : pair.slice(idx + 1));
+    params[key] = val;
+  });
+
+  if (params.error) {
+    show('Authorization declined', params.error_description || params.error, true);
+    if (window.opener) {
+      window.opener.postMessage({ source: 'swc-tool-oauth', error: params.error }, '*');
+    }
+    return;
+  }
+
+  if (!params.access_token) {
+    show('Nothing to do', 'No token found in the URL. You can close this window.', true);
+    return;
+  }
+
+  if (window.opener) {
+    window.opener.postMessage({
+      source: 'swc-tool-oauth',
+      access_token: params.access_token,
+      expires_in: params.expires_in ? parseInt(params.expires_in, 10) : null,
+      state: params.state || null
+    }, '*');
+    show('Connected', 'You can close this window.');
+    setTimeout(function () { window.close(); }, 1200);
+  } else {
+    show('Connected', 'Token received, but this window was not opened by the SWC Tool script, so it could not be delivered automatically. Close this window and try again from the tool.', true);
+  }
+})();
+</script>
+</body>
+</html>
