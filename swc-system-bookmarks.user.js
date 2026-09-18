@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.2.0
+// @version      1.2.1
 // @description  Bookmark space systems in Star Wars Combine and jump back to them with one click.
 // @author       you
 // @match        *://*.swcombine.com/*
@@ -141,18 +141,21 @@
     }
 
     function gmGet(url, token, onDone) {
+        console.log('[SWC Tool] GET', url);
         GM_xmlhttpRequest({
             method: 'GET',
             url: url,
             headers: { Authorization: 'OAuth ' + token },
             onload: function (response) {
+                console.log('[SWC Tool] response', response.status, url, '\n', (response.responseText || '').slice(0, 500));
                 if (response.status >= 200 && response.status < 300) {
                     onDone(null, response.responseText);
                 } else {
                     onDone({ status: response.status }, null);
                 }
             },
-            onerror: function () {
+            onerror: function (err) {
+                console.error('[SWC Tool] GM_xmlhttpRequest error', url, err);
                 onDone({ status: 0 }, null);
             }
         });
@@ -187,19 +190,23 @@
     function fetchRoster(onDone) {
         var token = getOAuthToken();
         if (!token) {
+            console.warn('[SWC Tool] fetchRoster: not connected');
             onDone('not_connected');
             return;
         }
 
         var handle = getCharacterHandle();
         if (!handle) {
+            console.warn('[SWC Tool] fetchRoster: could not find #alertbarhandle on this page');
             onDone('no_handle');
             return;
         }
+        console.log('[SWC Tool] fetchRoster: handle =', handle);
 
         var invUrl = 'https://www.swcombine.com/ws/v2.0/inventory/' + encodeURIComponent(handle) + '/';
         gmGet(invUrl, token.access_token, function (err, text) {
             if (err) {
+                console.error('[SWC Tool] fetchRoster: inventory list request failed', err);
                 if (err.status === 401 || err.status === 403) clearOAuthToken();
                 onDone('fetch_failed');
                 return;
@@ -208,6 +215,13 @@
             var doc = new DOMParser().parseFromString(text, 'application/xml');
             var npcOwner = doc.querySelector('inventory[type="npc"] > owner');
             var droidOwner = doc.querySelector('inventory[type="droid"] > owner');
+            console.log('[SWC Tool] fetchRoster: npcOwner href =', npcOwner && npcOwner.getAttribute('href'), 'droidOwner href =', droidOwner && droidOwner.getAttribute('href'));
+
+            if (!npcOwner && !droidOwner) {
+                console.warn('[SWC Tool] fetchRoster: no npc/droid inventory role found in response');
+                onDone('no_npc_or_droid');
+                return;
+            }
 
             var results = [];
             var pending = 0;
@@ -246,7 +260,6 @@
                     maybeFinish();
                 });
             }
-            if (pending === 0) onDone(null, []);
         });
     }
 
