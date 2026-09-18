@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.1.0
+// @version      1.1.1
 // @description  Bookmark space systems in Star Wars Combine and jump back to them with one click.
 // @author       you
 // @match        *://*.swcombine.com/*
@@ -184,9 +184,13 @@
         '.swc-bm-empty { padding: 12px; color: #999; font-style: italic; }',
         '#swc-bm-oauth {',
         '  padding: 10px 12px; border-bottom: 1px solid #3a3f4b;',
-        '  display: flex; align-items: center; justify-content: space-between; gap: 8px;',
+        '  display: flex; flex-direction: column; gap: 6px;',
         '}',
-        '#swc-bm-oauth .swc-bm-hint { flex: 1; }',
+        '.swc-bm-oauth-row {',
+        '  display: flex; align-items: center; gap: 6px;',
+        '}',
+        '.swc-bm-oauth-row .swc-bm-hint { flex: 1; }',
+        '.swc-bm-oauth-row input.swc-bm-note { flex: 1; }',
     ].join('\n'));
 
     // ---------- rendering ----------
@@ -201,6 +205,9 @@
 
     function renderOAuth() {
         oauthBox.innerHTML = '';
+
+        var statusRow = document.createElement('div');
+        statusRow.className = 'swc-bm-oauth-row';
 
         var hint = document.createElement('div');
         hint.className = 'swc-bm-hint';
@@ -232,8 +239,31 @@
             });
         }
 
-        oauthBox.appendChild(hint);
-        oauthBox.appendChild(btn);
+        statusRow.appendChild(hint);
+        statusRow.appendChild(btn);
+        oauthBox.appendChild(statusRow);
+
+        var pasteRow = document.createElement('div');
+        pasteRow.className = 'swc-bm-oauth-row';
+
+        var pasteInput = document.createElement('input');
+        pasteInput.type = 'text';
+        pasteInput.className = 'swc-bm-note';
+        pasteInput.placeholder = 'Or paste a Test Token…';
+
+        var useBtn = document.createElement('button');
+        useBtn.className = 'swc-bm-btn';
+        useBtn.textContent = 'Use';
+        useBtn.addEventListener('click', function () {
+            var value = pasteInput.value.trim();
+            if (!value) return;
+            saveOAuthToken(value, 60 * 60); // Test Tokens always last 1 hour
+            renderOAuth();
+        });
+
+        pasteRow.appendChild(pasteInput);
+        pasteRow.appendChild(useBtn);
+        oauthBox.appendChild(pasteRow);
     }
 
     function renderCurrent() {
