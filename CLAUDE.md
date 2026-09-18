@@ -15,6 +15,20 @@ tool gets served a challenge page instead of real content, for every URL on ever
 subdomain (www, www2, dev, guide, holocron, custom, images, ...) — this includes the
 API's own documentation pages and even the JSON/XML API responses themselves.
 
+**This also bit the userscript itself (2026-09-18):** `GM_xmlhttpRequest` calls
+from the userscript to `/ws/v2.0/...` got served the Anubis challenge page (HTTP
+200, but an HTML "Making sure you're not a bot!" page, not the API XML) — even
+though the same browser, same session, browsing normally, passes fine. A plain
+in-page `fetch()` to the exact same URL does NOT get challenged. Anubis is
+presumably fingerprinting `GM_xmlhttpRequest`'s extension-routed network stack
+(Tampermonkey proxies it through the extension background context, not the page's
+own renderer) as non-browser-like. **Takeaway: any userscript code calling
+swcombine.com's API must use plain `fetch()` (with `credentials: 'include'`), never
+`GM_xmlhttpRequest`, or it'll silently get Anubis HTML back instead of data.** The
+only downside is `fetch()` is subject to normal CORS/same-origin rules, so it only
+reliably works for API calls made while browsing `www.swcombine.com` itself (which
+is where the API lives) — not verified from `www2`/`dev` subdomains.
+
 The only way to actually browse the site or call the API from this environment is via
 the `claude-in-chrome` tools, using the user's already-logged-in Chrome session (user
 runs `/chrome` to enable it for a session). There is no way to verify site behavior,
