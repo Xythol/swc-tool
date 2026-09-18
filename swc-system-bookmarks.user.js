@@ -1,15 +1,13 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.2.1
+// @version      1.2.2
 // @description  Bookmark space systems in Star Wars Combine and jump back to them with one click.
 // @author       you
 // @match        *://*.swcombine.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
-// @grant        GM_xmlhttpRequest
-// @connect      www.swcombine.com
 // @run-at       document-end
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/Xythol/swc-tool/master/swc-system-bookmarks.user.js
@@ -140,24 +138,23 @@
         }
     }
 
-    function gmGet(url, token, onDone) {
+    function apiGet(url, token, onDone) {
         console.log('[SWC Tool] GET', url);
-        GM_xmlhttpRequest({
-            method: 'GET',
-            url: url,
+        fetch(url, {
             headers: { Authorization: 'OAuth ' + token },
-            onload: function (response) {
-                console.log('[SWC Tool] response', response.status, url, '\n', (response.responseText || '').slice(0, 500));
+            credentials: 'include'
+        }).then(function (response) {
+            return response.text().then(function (text) {
+                console.log('[SWC Tool] response', response.status, url, '\n', text.slice(0, 500));
                 if (response.status >= 200 && response.status < 300) {
-                    onDone(null, response.responseText);
+                    onDone(null, text);
                 } else {
                     onDone({ status: response.status }, null);
                 }
-            },
-            onerror: function (err) {
-                console.error('[SWC Tool] GM_xmlhttpRequest error', url, err);
-                onDone({ status: 0 }, null);
-            }
+            });
+        }).catch(function (err) {
+            console.error('[SWC Tool] fetch error', url, err);
+            onDone({ status: 0 }, null);
         });
     }
 
@@ -204,7 +201,7 @@
         console.log('[SWC Tool] fetchRoster: handle =', handle);
 
         var invUrl = 'https://www.swcombine.com/ws/v2.0/inventory/' + encodeURIComponent(handle) + '/';
-        gmGet(invUrl, token.access_token, function (err, text) {
+        apiGet(invUrl, token.access_token, function (err, text) {
             if (err) {
                 console.error('[SWC Tool] fetchRoster: inventory list request failed', err);
                 if (err.status === 401 || err.status === 403) clearOAuthToken();
@@ -240,7 +237,7 @@
 
             if (npcOwner) {
                 pending++;
-                gmGet(npcOwner.getAttribute('href'), token.access_token, function (err2, text2) {
+                apiGet(npcOwner.getAttribute('href'), token.access_token, function (err2, text2) {
                     if (err2) {
                         hadError = true;
                     } else {
@@ -251,7 +248,7 @@
             }
             if (droidOwner) {
                 pending++;
-                gmGet(droidOwner.getAttribute('href'), token.access_token, function (err2, text2) {
+                apiGet(droidOwner.getAttribute('href'), token.access_token, function (err2, text2) {
                     if (err2) {
                         hadError = true;
                     } else {
