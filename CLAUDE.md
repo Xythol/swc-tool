@@ -41,11 +41,22 @@ is under active development.
 
 ## Changelog
 
-- **2026-09-18** — NPC roster feature complete: OAuth connect (popup + Test Token
-  paste fallback), and a "NPC Roster" panel section that fetches the character's
-  NPCs and droids (name, HP/hull, current location, role, level) via the Inventory
-  API and shows them with a manual Refresh button. See "Registered app" and
-  "Confirmed Inventory API shape" sections below for the full trail.
+- **2026-09-18** — XP/hour + time-to-level tracker, replacing the NPC roster (see
+  below). Samples current XP via a background `fetch('/members/')` — works from
+  any page, including system pages where this panel lives, since the XP figure
+  only renders on `/members/*` pages — at most once every 2 minutes, and computes
+  a rate over a rolling 4-hour window of samples. See "XP tracker implementation
+  notes" below for the non-obvious bit (the "Next: N" threshold isn't in the
+  static DOM).
+- **2026-09-18** — Built, then scrapped, an OAuth-based NPC/droid roster feature
+  (popup connect flow + Test Token paste fallback + Inventory API calls) — fully
+  working end to end, but the user decided to keep this tool auth-free rather than
+  carry OAuth's token-expiry/reconnect friction for that feature. Full detail (app
+  registration, Test Token generation via Chrome, confirmed Inventory API shape,
+  the GitHub Pages OAuth callback page) is in git history from `15918cc` (Add
+  OAuth callback page for GitHub Pages) through `69c15f5` (Remove OAuth callback
+  page) if OAuth is ever revisited — not kept here to avoid this file carrying a
+  large dead section. **Don't rebuild this without checking with the user first.**
 - **2026-09-18** — Initial release: `swc-system-bookmarks.user.js`. Floating overlay
   panel (bottom-right, collapsible) that detects the current system page via URL
   (`Galaxy_Map` + `systemID` query params) and tab title
@@ -62,6 +73,8 @@ is under active development.
 Roughly ordered by effort. None of these are started yet.
 
 ### Tier 1 — public API, no auth needed, can build without any OAuth setup
+- [x] XP/hour + time-to-level tracker (2026-09-18) — see Changelog and "XP tracker
+      implementation notes" below. No API/auth involved at all, just page scraping.
 - [ ] Add a Galactic Time readout to the existing overlay (or a tiny standalone widget)
       using `GET /ws/v2.0/api/time/`.
 - [ ] Enrich the bookmarks panel: fetch `GET /ws/v2.0/galaxy/systems/{uid}/` for each
@@ -85,10 +98,8 @@ Roughly ordered by effort. None of these are started yet.
       `character_events` scopes).
 - [ ] Mail notifier — poll `Character/Messages` and surface new in-game mail
       (desktop notification or Discord ping) (`messages_read` scope).
-- [x] NPC/droid roster (2026-09-18) — see Changelog. Not yet extended to
-      ships/vehicles/items/etc., or to the entity-tagging support
-      (`*_tags_read`/`*_tags_write`) for a custom organization scheme — that
-      remains open if wanted later.
+- [ ] ~~NPC/droid roster~~ — built working end-to-end, then scrapped 2026-09-18;
+      see Changelog. Don't restart this without checking with the user.
 
 ### Tier 3 — bigger lift (write scopes, faction leadership, or a standalone service)
 - [ ] Faction treasury/budget dashboard (`faction_budgets_*`, `faction_credits_*`).
@@ -99,177 +110,49 @@ Roughly ordered by effort. None of these are started yet.
 
 OAuth for a browser-only tool means the client-side/implicit flow (no client secret),
 which needs an app registered on swcombine.com and a hosted redirect page. Bigger lift
-than anything in Tier 1 — scope that out properly before starting Tier 2.
+than anything in Tier 1 — scope that out properly before starting Tier 2. **Full
+detail on how this was built (app registration, Test Token generation via Chrome,
+the confirmed Inventory API shape, the `access_denied_inactive_client` dead end,
+the GitHub Pages callback page) is in git history — see the Changelog entry above
+for the exact commit range — since it was built and then scrapped.** The one fact
+still worth keeping here because it's general API knowledge, not NPC-specific: the
+**website's login session cookie does NOT authenticate API calls** — confirmed by
+hitting `/ws/v2.0/api/helloauth/` and `/ws/v2.0/character/` from the logged-in
+browser with no `access_token` and getting `403 Access Token Not Provided`. The API
+and the website session are separate auth domains by design.
 
-**Confirmed empirically (2026-09-18): the website's login session cookie does NOT
-authenticate API calls.** Hit `/ws/v2.0/api/helloauth/` and `/ws/v2.0/character/`
-directly from the user's logged-in browser with no `access_token` — both returned
-`403 Access Token Not Provided`. The API and the website session are separate auth
-domains by design; there is no shortcut through "already being logged in."
+### XP tracker implementation notes
 
-**App registration** is self-service, no approval wait observed: start at
-`https://www.swcombine.com/ws/registration/` (Step 1 is just an App Name — linked
-account is auto-filled from whoever registers it). Authorized apps and their live
-tokens are manageable/revocable at
-`https://www.swcombine.com/members/actsettings/index.php?mode=ws` ("Web Services" tab
-under Account Settings) — this page is also how to inspect exactly what scopes an
-app actually holds.
+The XP figure (`#menu_CurXP`, plain text like `6,613`) only renders on `/members/*`
+pages — confirmed absent on `/rules/` and on system pages
+(`/rules/?Galaxy_Map=&systemID=...`), which is where this panel is actually used.
+So instead of scraping the current page, the tracker does a background
+`fetch(location.origin + '/members/', { credentials: 'include' })` regardless of
+what page you're on, and parses the response — same-origin, so no CORS issue, and
+plain `fetch()` passes Anubis fine (see the GM_xmlhttpRequest note above).
 
-**Important architecture finding**: `client_id` is not secret — safe to hardcode
-directly in the userscript source (checked into this repo), so it ships to every
-device automatically via the existing `@updateURL` mechanism, no per-device setup.
-But the *token lifecycle* has a real fork, confirmed by inspecting the user's own
-token list on the Web Services settings page:
-
-- **The Forge holds both an Access Token AND a Refresh Token** for this user. Per
-  SWC's own OAuth docs, refresh tokens are only issued via the **authorization-code**
-  flow (server-side) — the **client-side/implicit** flow (`response_type=token`,
-  the only flow a pure browser userscript can do without exposing a secret) has no
-  refresh token in its response at all. This means The Forge runs its own backend
-  that holds a `client_secret` and refreshes tokens silently forever, without ever
-  re-prompting the user.
-- A pure Tampermonkey userscript **cannot replicate that** — implicit-flow access
-  tokens expire (lifetime returned as `expires_in` on issuance, actual value for
-  this API not yet confirmed) and there is no secret-free way to mint a new one
-  without redirecting the user through `/ws/oauth2/auth/` again. SWC's docs mention
-  a `renew_previously_granted=yes` param that may allow a silent-ish re-grant if the
-  site session is still active and the same scopes were already approved — untested,
-  worth verifying empirically before relying on it.
-- **Decision point for whoever builds Tier 2**: accept periodic "reconnect" friction
-  (pure client-side implicit flow, no new infrastructure, consistent with this repo
-  being "just a userscript" so far) vs. build a small hosted backend to hold a
-  `client_secret` and do silent refresh like The Forge (meaningfully bigger lift —
-  closer to Tier 3 in scope, needs somewhere to run and to store the refresh token
-  server-side, never in client JS).
-- **Decided (2026-09-18)**: going with the pure client-side/implicit flow, occasional
-  reconnect prompts accepted. No backend.
-
-### OAuth redirect page (GitHub Pages)
-
-`oauth-callback.html` at the repo root is the OAuth app's `redirect_uri` target,
-served via GitHub Pages: **https://xythol.github.io/swc-tool/oauth-callback.html**
-(Pages enabled 2026-09-18 via `gh api repos/Xythol/swc-tool/pages`, source =
-`master` branch root — takes a minute to start serving after first enabling).
-
-It's a plain static page with **no Tampermonkey dependency** — it doesn't need to be
-in the userscript's `@match` list. Mechanism: the "Connect" button in the overlay
-opens the SWC auth URL in a `window.open()` popup (not a full-page redirect) and
-keeps a reference to it; SWC redirects that popup to this page with
-`#access_token=...&expires_in=...` in the fragment; the page parses the fragment
-client-side (fragments never hit a server) and calls
-`window.opener.postMessage({ source: 'swc-tool-oauth', access_token, expires_in }, '*')`
-before closing itself. The main content script listens for that `message` event on
-the game tab, verifies `event.source` is the popup it opened, and stores the token
-(+ computed expiry) via `GM_setValue`. Handles the `error=access_denied` case too.
-
-When registering the app at `https://www.swcombine.com/ws/registration/`, use the
-Pages URL above as the redirect URI.
-
-### Registered app: "SWC Tool" — blocked on "Active: No"
-
-Registered 2026-09-18, id 281. `Client ID` = `fccda0a63979711c8d1138da34ac30b38576be36`
-(this is the value embedded as `OAUTH_CLIENT_ID` in the userscript — confirmed
-against the account settings page, not a guess). `Client Secret` exists but is
-intentionally unused/never embedded anywhere, per the "no backend" decision above.
-
-**The real popup-based OAuth flow does not work yet.** Hitting
-`/ws/oauth2/auth/` with this client_id returns `<error>access_denied_inactive_client</error>`.
-The app's edit page (`/members/actsettings/clients_edit.php?id=281`) shows
-`Active: No` as a plain read-only label — no self-service toggle found anywhere in
-the UI. Likely needs manual/staff-side approval (unconfirmed — the
-`www.swcombine.com/ws/developers/` hub 403'd when checked for an FAQ on this, and
-`#swc-dev` on IRC was the only dev-contact channel found via the `swc-core` repo
-README). **Next time this comes up: check if it's since flipped to Active, and if
-not, consider asking in the game/Discord/IRC what activates a client.**
-
-**Workaround that works today: Test Tokens.** Account Settings → Web Services →
-the app's "Test Token" action
-(`/members/actsettings/index.php?mode=wstesttoken&id=281`) lets the account owner
-self-generate a scoped access token directly, no "Active" requirement, via a
-checkbox list of the same 173 permissions. Constraint: **expires in 1 hour, no
-refresh** — must be manually regenerated and re-entered each time. Useful for
-developing/testing the Inventory API calls right now regardless of activation
-status, and may end up being the permanent mechanism if activation turns out to be
-gated behind something out of reach (e.g. requires being a known/trusted developer).
-
-Minimal scope set for the NPC roster feature (tick only these on the Test Token
-page — everything else, especially any `*_write`/`*_rename`/`*_assign` box, is
-unnecessary for a read-only dashboard): `personal_inv_overview`,
-`personal_inv_npcs_read`, `personal_inv_droids_read`. Matches `OAUTH_SCOPES` in the
-userscript exactly.
-
-**Implemented (2026-09-18)**: the overlay's "NPC Roster" section has two ways to
-get a token — the popup Connect button (non-functional until the app is Active),
-and a plain paste-a-token input next to it that accepts a Test Token and stores it
-via `saveOAuthToken(value, 3600)` (hardcoded 1-hour TTL, since that's fixed for
-Test Tokens).
-
-**Generating a Test Token via Chrome, if needed again**: the checkboxes on
-`/members/actsettings/index.php?mode=wstesttoken&id=281` are plain
-`<input type="checkbox" name="scope[]" value="...">` elements, but this page is
-Vue-heavy and coordinate/ref-based clicks were unreliable (silently didn't toggle
-the box). Set `.checked = true` and dispatch `change`+`input` events via
-`javascript_tool` instead, then find the "Create Test Token" button by text and
-call `.click()` on it directly (also via JS) rather than a coordinate click. On
-success it does a real form POST that redirects to `mode=ws` with a flash message
-"Created test access token: XXXX" at the top — that flash is the only place the
-raw token is ever shown, so read the page immediately after.
-
-Also: **never navigate to a URL with a raw token in the query string** — Claude
-Code's own auto-mode classifier blocks this ("Credential Materialization"), and
-rightly so, since it'd land in browser history. Use `fetch()` with an
-`Authorization: OAuth <token>` header via `javascript_tool` instead — same
-result, doesn't materialize the secret anywhere.
-
-### Confirmed Inventory API shape (2026-09-18, via a self-issued Test Token)
-
-`GET /ws/v2.0/inventory/{characterHandle}/` (needs `personal_inv_overview`) returns
-one `<inventory type="...">` block per category (`ship`, `vehicle`, `station`,
-`facility`, `city`, `planet`, `item`, `npc`, `droid`, `creature`, `material`), each
-with `owner`/`commander`/`pilot` role sub-elements carrying an `href` to that
-role's actual entity collection, e.g.:
-`/ws/v2.0/inventory/{characterUid}/npcs/owner/` (characterUid is the `type:id`
-form like `1:1479537`, from the `uid` attribute on any role element).
-
-`GET` that role href (needs `personal_inv_npcs_read` / `personal_inv_droids_read`)
-returns the full entity list **with everything needed for a roster view in one
-call — no per-entity follow-up request required**:
-
-```xml
-<entities count="10" start="1" total="10">
-  <entity href=".../inventory/npcs/10%3A21304262/">
-    <uid>10:21304262</uid>
-    <entitytype>NPC</entitytype>
-    <name>Nayva Ran-shok</name>
-    <owner uid="1:1479537" type="character" href="...">Zythol Kho</owner>
-    <!-- commander, pilot: same shape as owner -->
-    <images><small>...</small><large>...</large></images>
-    <protected>no</protected>
-    <hp max="61">61</hp>
-    <location>
-      <container uid="2:3809211" type="ship" href="...">[AL] Hunter</container>
-      <sector .../><system .../><planet .../><city .../>
-      <coordinates><galaxy x="-73" y="-443"/><system x="8" y="9"/>...</coordinates>
-    </location>
-    <type uid="10:23" href=".../types/npcs/rifleman/">Rifleman</type>
-    <race uid="22:27" href="...">Qiraash</race>
-    <gender gender="F">Female</gender>
-    <level>1</level>
-    <tags count="1"><tag>Shotgun</tag></tags>
-  </entity>
-  <!-- ... -->
-</entities>
+**The "Next: N" level threshold is NOT in the static DOM** — it's rendered
+client-side by a Vue component (`<coloured-status-bar2>`), so a `fetch()`+
+`DOMParser` (which doesn't execute JS) can't read it from the parsed document.
+It IS present as a static HTML attribute on that component's own tag before Vue
+hydrates it, though:
+```html
+<coloured-status-bar2 width="90" height="12" :value="613" :value-max="4000"
+  title="Next: 10,000" tooltip="6,613 / 10,000 XP..." unit="XP">
 ```
+So the tracker greps the raw HTML text for `<coloured-status-bar2 ...>` tags,
+picks the one with `unit="XP"` (there can be more than one status bar on the page
+— HP, CP, etc.), and regexes `title="Next:\s*([\d,]+)"` out of it. This is more
+fragile than a proper CSS selector (breaks if SWC renames the component or
+reorders attributes) but there's no cleaner static source for this value.
 
-**Droids use a different health model** — no `hp`, instead:
-`<wrecked>no</wrecked><hull max="55">55</hull><shield max="0">0</shield><ionic max="55">55</ionic>`
-(no `race`/`gender` either, otherwise same shape: `uid`, `entitytype`, `name`,
-owner/commander/pilot, `images`, `location`, `type`).
-
-This means the NPC roster feature needs exactly one authenticated GET per category
-(`npcs/owner/` and `droids/owner/`) — cheap, no pagination needed at this
-character's scale (10 NPCs, 1 droid; `count`/`start`/`total` attributes are there
-if it ever needs paging past 50).
+Storage: `swc_xp_samples` (rolling array of `{t, xp}`, pruned to the last 4 hours
+— `XP_WINDOW_MS` — capped at 200 entries), `swc_xp_next` (latest known threshold,
+not time-series), `swc_xp_last_fetch` (throttle timestamp, min 2 minutes between
+background samples — `XP_SAMPLE_INTERVAL_MS`). Rate is just
+`(newest.xp - oldest.xp) / hoursBetween` across whatever's left in the window
+after pruning — no smoothing beyond that. A manual "Sample now" button in the
+panel bypasses the throttle for an on-demand reading.
 
 ### Prior art — check before building anything new
 
@@ -312,7 +195,7 @@ the singular `Character` resource's doc page is `/documentation/character/uid/`,
 
 ### Format & conventions
 
-- All responses are XML, wrapped in a `<swcapi xmlns="https://www.swcombine.com/ws/swcapi-ns/" version="2.0" timestamp="..." resource="..." request="...">` envelope. JSON via `Accept: application/json` is untested — worth trying with `GM_xmlhttpRequest` (bypasses CORS) before assuming XML-only.
+- All responses are XML, wrapped in a `<swcapi xmlns="https://www.swcombine.com/ws/swcapi-ns/" version="2.0" timestamp="..." resource="..." request="...">` envelope. JSON via `Accept: application/json` is untested — if trying it from a userscript, use plain `fetch()`, not `GM_xmlhttpRequest` (see the Anubis note above).
 - List endpoints paginate via `start_index` (1-based) and `item_count` (max 50) query params.
 - Auth is OAuth2: authorization-code (server apps), implicit/client-side (browser apps, no secret), and refresh-token flows. Scopes are requested by name (below).
 - Rate limiting is per-endpoint, not global. Check your own status: `GET /ws/v2.0/api/ratelimits/` (itself not rate limited).
