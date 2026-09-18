@@ -51,7 +51,8 @@ Roughly ordered by effort. None of these are started yet.
 - [ ] Real galaxy map tool: `Galaxy/Systems` returns x/y coordinates, controlling
       faction, population, and sector per system. Enough to build a proper 2D map
       (color-coded by faction, searchable, straight-line distance calculator between
-      two systems) — something the game itself doesn't provide.
+      two systems) — something the game itself doesn't provide. Note: this is about
+      a *visual* map, not hyperlane routing — see "Prior art" below, that's solved.
 - [ ] Faction lookup card — hover/click any faction name in-game to pop up a card
       pulled from `GET /ws/v2.0/faction/{uid}/` (description, leader, colors, roster).
 - [ ] Galactic News (GNS) reader/ticker, or a Discord bot posting new items — endpoint
@@ -79,6 +80,30 @@ Roughly ordered by effort. None of these are started yet.
 OAuth for a browser-only tool means the client-side/implicit flow (no client secret),
 which needs an app registered on swcombine.com and a hosted redirect page. Bigger lift
 than anything in Tier 1 — scope that out properly before starting Tier 2.
+
+### Prior art — check before building anything new
+
+**The Forge** (https://swc-forge.com) is a third-party community tool platform the
+user already has an account on, with a companion Tampermonkey script already
+installed (its console logs show as "Forge" — "Inventory Module", "Equipment
+Module", etc.). Confirmed features as of 2026-09-18:
+
+- **Hyper Routes** (`/hl/routes`) — exactly the "fastest route via hyperlanes"
+  problem: multi-jump pathfinding between two systems, using ship presets or manual
+  Pilot Skill/Hyper/Sublight stats, with per-leg and total time, a direct-route
+  comparison (% time saved), system exclusions, and a map visualization. Backed by
+  its own API at `api.swc-forge.com/api/hyper/v2/routes` (third-party, not the
+  official SWC web service — the official API has no Hyperlane resource, so this
+  connectivity data is something The Forge scrapes/maintains itself).
+- Also has: Galaxy Map, ship comparison, cargo/fitout calculators, vendor listings,
+  bounty hunting tools (contract tracking, target heatmap), asteroid fields, Discord
+  timestamp helper. Full nav is visible at `swc-forge.com` when logged in.
+
+**Decision (2026-09-18): don't rebuild hyperlane routing** — The Forge already does
+it well and the user already uses it. Before starting any new Tier 1/2/3 idea above,
+check whether The Forge already covers it; if so, default to "use what exists"
+unless the user specifically wants a tighter integration with our own bookmarks tool
+or has an explicit reason to build our own.
 
 ## API Reference — SWCombine Web Service v2.0
 
