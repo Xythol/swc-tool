@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.0.0
+// @version      1.0.1
 // @description  Bookmark space systems in Star Wars Combine and jump back to them with one click.
 // @author       you
 // @match        *://*.swcombine.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_addStyle
 // @run-at       document-end
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/Xythol/swc-tool/master/swc-system-bookmarks.user.js
