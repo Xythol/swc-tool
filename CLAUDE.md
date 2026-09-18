@@ -27,6 +27,11 @@ is under active development.
 
 ## Changelog
 
+- **2026-09-18** — NPC roster feature complete: OAuth connect (popup + Test Token
+  paste fallback), and a "NPC Roster" panel section that fetches the character's
+  NPCs and droids (name, HP/hull, current location, role, level) via the Inventory
+  API and shows them with a manual Refresh button. See "Registered app" and
+  "Confirmed Inventory API shape" sections below for the full trail.
 - **2026-09-18** — Initial release: `swc-system-bookmarks.user.js`. Floating overlay
   panel (bottom-right, collapsible) that detects the current system page via URL
   (`Galaxy_Map` + `systemID` query params) and tab title
@@ -66,9 +71,10 @@ Roughly ordered by effort. None of these are started yet.
       `character_events` scopes).
 - [ ] Mail notifier — poll `Character/Messages` and surface new in-game mail
       (desktop notification or Discord ping) (`messages_read` scope).
-- [ ] Unified inventory dashboard across ships/vehicles/items/droids/etc., using the
-      API's own entity-tagging support for a custom organization scheme
-      (`personal_inv_*_read` + `*_tags_read`/`*_tags_write` scopes).
+- [x] NPC/droid roster (2026-09-18) — see Changelog. Not yet extended to
+      ships/vehicles/items/etc., or to the entity-tagging support
+      (`*_tags_read`/`*_tags_write`) for a custom organization scheme — that
+      remains open if wanted later.
 
 ### Tier 3 — bigger lift (write scopes, faction leadership, or a standalone service)
 - [ ] Faction treasury/budget dashboard (`faction_budgets_*`, `faction_credits_*`).
@@ -182,9 +188,74 @@ userscript exactly.
 get a token — the popup Connect button (non-functional until the app is Active),
 and a plain paste-a-token input next to it that accepts a Test Token and stores it
 via `saveOAuthToken(value, 3600)` (hardcoded 1-hour TTL, since that's fixed for
-Test Tokens). No actual Inventory API call wired up yet — this is auth plumbing
-only. Next step: confirm the exact Inventory/NPC/Droid request shape via Chrome,
-then build the fetch + render.
+Test Tokens).
+
+**Generating a Test Token via Chrome, if needed again**: the checkboxes on
+`/members/actsettings/index.php?mode=wstesttoken&id=281` are plain
+`<input type="checkbox" name="scope[]" value="...">` elements, but this page is
+Vue-heavy and coordinate/ref-based clicks were unreliable (silently didn't toggle
+the box). Set `.checked = true` and dispatch `change`+`input` events via
+`javascript_tool` instead, then find the "Create Test Token" button by text and
+call `.click()` on it directly (also via JS) rather than a coordinate click. On
+success it does a real form POST that redirects to `mode=ws` with a flash message
+"Created test access token: XXXX" at the top — that flash is the only place the
+raw token is ever shown, so read the page immediately after.
+
+Also: **never navigate to a URL with a raw token in the query string** — Claude
+Code's own auto-mode classifier blocks this ("Credential Materialization"), and
+rightly so, since it'd land in browser history. Use `fetch()` with an
+`Authorization: OAuth <token>` header via `javascript_tool` instead — same
+result, doesn't materialize the secret anywhere.
+
+### Confirmed Inventory API shape (2026-09-18, via a self-issued Test Token)
+
+`GET /ws/v2.0/inventory/{characterHandle}/` (needs `personal_inv_overview`) returns
+one `<inventory type="...">` block per category (`ship`, `vehicle`, `station`,
+`facility`, `city`, `planet`, `item`, `npc`, `droid`, `creature`, `material`), each
+with `owner`/`commander`/`pilot` role sub-elements carrying an `href` to that
+role's actual entity collection, e.g.:
+`/ws/v2.0/inventory/{characterUid}/npcs/owner/` (characterUid is the `type:id`
+form like `1:1479537`, from the `uid` attribute on any role element).
+
+`GET` that role href (needs `personal_inv_npcs_read` / `personal_inv_droids_read`)
+returns the full entity list **with everything needed for a roster view in one
+call — no per-entity follow-up request required**:
+
+```xml
+<entities count="10" start="1" total="10">
+  <entity href=".../inventory/npcs/10%3A21304262/">
+    <uid>10:21304262</uid>
+    <entitytype>NPC</entitytype>
+    <name>Nayva Ran-shok</name>
+    <owner uid="1:1479537" type="character" href="...">Zythol Kho</owner>
+    <!-- commander, pilot: same shape as owner -->
+    <images><small>...</small><large>...</large></images>
+    <protected>no</protected>
+    <hp max="61">61</hp>
+    <location>
+      <container uid="2:3809211" type="ship" href="...">[AL] Hunter</container>
+      <sector .../><system .../><planet .../><city .../>
+      <coordinates><galaxy x="-73" y="-443"/><system x="8" y="9"/>...</coordinates>
+    </location>
+    <type uid="10:23" href=".../types/npcs/rifleman/">Rifleman</type>
+    <race uid="22:27" href="...">Qiraash</race>
+    <gender gender="F">Female</gender>
+    <level>1</level>
+    <tags count="1"><tag>Shotgun</tag></tags>
+  </entity>
+  <!-- ... -->
+</entities>
+```
+
+**Droids use a different health model** — no `hp`, instead:
+`<wrecked>no</wrecked><hull max="55">55</hull><shield max="0">0</shield><ionic max="55">55</ionic>`
+(no `race`/`gender` either, otherwise same shape: `uid`, `entitytype`, `name`,
+owner/commander/pilot, `images`, `location`, `type`).
+
+This means the NPC roster feature needs exactly one authenticated GET per category
+(`npcs/owner/` and `droids/owner/`) — cheap, no pagination needed at this
+character's scale (10 NPCs, 1 droid; `count`/`start`/`total` attributes are there
+if it ever needs paging past 50).
 
 ### Prior art — check before building anything new
 
