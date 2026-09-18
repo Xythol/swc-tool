@@ -9,6 +9,8 @@
 // @grant        GM_getValue
 // @run-at       document-end
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/Xythol/swc-tool/master/swc-system-bookmarks.user.js
+// @downloadURL  https://raw.githubusercontent.com/Xythol/swc-tool/master/swc-system-bookmarks.user.js
 // ==/UserScript==
 
 (function () {
