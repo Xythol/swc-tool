@@ -148,6 +148,14 @@ Roughly ordered by effort. None of these are started yet.
 - [ ] Discord bridge service (not just a userscript) posting GNS news, character
       events, or faction budget alerts — there's real precedent for this pattern:
       a community "T3M3.Bot" already does something similar on the older `.NET` SDK.
+- [ ] Android app wrapping swcombine.com in a WebView with this userscript (or a
+      port of it) injected, so the floating bookmarks/XP panel works on mobile —
+      Tampermonkey has no Android build, so this is the mobile equivalent: a thin
+      native shell around `WebView.evaluateJavascript()`/`addJavascriptInterface()`
+      rather than a from-scratch mobile client. Orthogonal to the API-scope tiers
+      above (it's a delivery mechanism, not a feature) and a much bigger lift than
+      anything else here — real Android dev, an APK to distribute/update, and
+      probably its own repo rather than living alongside the userscript.
 
 OAuth for a browser-only tool means the client-side/implicit flow (no client secret),
 which needs an app registered on swcombine.com and a hosted redirect page. Bigger lift
