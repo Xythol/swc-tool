@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.4.0
+// @version      1.4.1
 // @description  Bookmark any space location in Star Wars Combine - systems, planets, asteroid fields, deep space - and track XP/hour + time to next level.
 // @author       you
 // @match        *://*.swcombine.com/*
@@ -169,39 +169,61 @@
         return { galX: coordMatch[1], galY: coordMatch[2], sysX: '0', sysY: '0', name: titleMatch[1] };
     }
 
-    // Convenience save point 2: the travel planner itself, landed on either via
-    // a game "Plan Travel" link (planet/station/asteroid field) or by manually
-    // entering coordinates for empty deep space. Visiting it doesn't commit any
-    // travel - it just opens the form with "Update Plan" one click away.
+    // Convenience save point 2: the travel planner itself. It never navigates
+    // via query string - landing on it bare shows whatever plan is currently
+    // active, and "Update Plan" is a same-URL form POST - so the only reliable
+    // source of truth is the live form state: the #galX/#galY/#sysX/#sysY
+    // number inputs, which hold the current plan OR whatever the user is
+    // mid-typing, regardless of how they got to the page. Reading the URL (the
+    // original approach) only worked for the one case of landing via a "Plan
+    // Travel" link and went stale the moment the user edited coordinates by
+    // hand without the URL changing to match.
+    // Captured once, the first time the travel planner is detected on a given
+    // page load - i.e. before any hand-editing - so we can tell whether the
+    // coordinate boxes still match what the page loaded with (see below).
+    var travelPlannerInitialCoords = null;
+
     function detectTravelPlannerLocation() {
         if (location.pathname.indexOf('/members/cockpit/travel/directed.php') === -1) return null;
 
-        var params = new URLSearchParams(location.search);
-        if (params.get('supplied') !== '1') return null;
+        var galXEl = document.getElementById('galX');
+        var galYEl = document.getElementById('galY');
+        if (!galXEl || !galYEl) return null;
 
-        var galX = params.get('galX');
-        var galY = params.get('galY');
-        if (!galX || !galY || !/^-?\d+$/.test(galX) || !/^-?\d+$/.test(galY)) return null;
+        var galX = galXEl.value;
+        var galY = galYEl.value;
+        if (!/^-?\d+$/.test(galX) || !/^-?\d+$/.test(galY)) return null;
 
-        // #systemSelector / #planetSelector are pre-selected by the page itself
-        // when the coordinates resolve to a known place; their placeholder
-        // options ("-- System --" / "-- Planet --") mean nothing resolved.
-        var systemSel = document.getElementById('systemSelector');
-        var planetSel = document.getElementById('planetSelector');
-        var systemName = systemSel && systemSel.selectedIndex >= 0 ? systemSel.options[systemSel.selectedIndex].text : '';
-        var planetName = planetSel && planetSel.selectedIndex >= 0 ? planetSel.options[planetSel.selectedIndex].text : '';
+        var sysXEl = document.getElementById('sysX');
+        var sysYEl = document.getElementById('sysY');
+        var sysX = (sysXEl && sysXEl.value) || '0';
+        var sysY = (sysYEl && sysYEl.value) || '0';
+
+        if (travelPlannerInitialCoords === null) {
+            travelPlannerInitialCoords = { galX: galX, galY: galY, sysX: sysX, sysY: sysY };
+        }
+        var unedited = travelPlannerInitialCoords.galX === galX && travelPlannerInitialCoords.galY === galY &&
+            travelPlannerInitialCoords.sysX === sysX && travelPlannerInitialCoords.sysY === sysY;
+
+        // #systemSelector / #planetSelector are resolved by the page once,
+        // server-side, to match whatever plan it loaded with - confirmed live
+        // that they do NOT reactively re-resolve when the coordinate boxes are
+        // hand-edited, they just keep showing the previous plan's name. So the
+        // resolved name is only trustworthy while unedited; the moment the
+        // boxes differ from what the page loaded with, treat the name as
+        // unknown rather than show a stale, wrong one.
         var name = null;
-        if (systemName && systemName.indexOf('--') === -1) {
-            name = (planetName && planetName.indexOf('--') === -1) ? (systemName + ' – ' + planetName) : systemName;
+        if (unedited) {
+            var systemSel = document.getElementById('systemSelector');
+            var planetSel = document.getElementById('planetSelector');
+            var systemName = systemSel && systemSel.selectedIndex >= 0 ? systemSel.options[systemSel.selectedIndex].text : '';
+            var planetName = planetSel && planetSel.selectedIndex >= 0 ? planetSel.options[planetSel.selectedIndex].text : '';
+            if (systemName && systemName.indexOf('--') === -1) {
+                name = (planetName && planetName.indexOf('--') === -1) ? (systemName + ' – ' + planetName) : systemName;
+            }
         }
 
-        return {
-            galX: galX,
-            galY: galY,
-            sysX: params.get('sysX') || '0',
-            sysY: params.get('sysY') || '0',
-            name: name
-        };
+        return { galX: galX, galY: galY, sysX: sysX, sysY: sysY, name: name };
     }
 
     function detectCurrent() {
@@ -217,7 +239,12 @@
     }
 
     function bookmarkLabel(bm) {
-        if (bm.galX != null) return bm.name || 'Deep Space (' + bm.galX + ', ' + bm.galY + ')';
+        // No name doesn't always mean deep space - it can also mean the
+        // coordinates were hand-edited and never re-verified (see
+        // detectTravelPlannerLocation), so this stays a neutral coordinate
+        // label rather than asserting "Deep Space" for something we're not
+        // actually sure about.
+        if (bm.galX != null) return bm.name || '(' + bm.galX + ', ' + bm.galY + ')';
         return bm.name;
     }
 
@@ -523,6 +550,19 @@
         render();
         maybeSampleXP(function (sampled) {
             if (sampled) render();
+        });
+
+        // The travel planner's coordinate inputs/dropdowns change without any
+        // navigation (same-page form, no URL update - see
+        // detectTravelPlannerLocation), so the panel needs its own listeners to
+        // stay in sync as the user edits them, rather than only detecting state
+        // once at page load.
+        var TRAVEL_PLANNER_FIELD_IDS = ['galX', 'galY', 'sysX', 'sysY', 'systemSelector', 'planetSelector'];
+        document.addEventListener('input', function (e) {
+            if (e.target && TRAVEL_PLANNER_FIELD_IDS.indexOf(e.target.id) !== -1) renderCurrent();
+        });
+        document.addEventListener('change', function (e) {
+            if (e.target && TRAVEL_PLANNER_FIELD_IDS.indexOf(e.target.id) !== -1) renderCurrent();
         });
     }
 

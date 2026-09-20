@@ -41,6 +41,22 @@ is under active development.
 
 ## Changelog
 
+- **2026-09-20** — Fixed travel-planner location detection: it was reading
+  `galX`/`galY`/`sysX`/`sysY` from the URL query string, which only worked for
+  the one case of landing on the page via a "Plan Travel" link. The page never
+  navigates via query string otherwise — the bare URL just re-renders whatever
+  plan is currently active, and "Update Plan" is a same-URL form POST — so
+  hand-editing the coordinate boxes (the user's actual workflow: type
+  coordinates, check they resolve, bookmark) never changed the URL and the old
+  detection silently went stale. Now reads the live form inputs
+  (`#galX`/`#galY`/`#sysX`/`#sysY`) directly instead, with `input`/`change`
+  listeners so the panel updates as you type rather than only at page load.
+  Also fixed a related staleness bug this surfaced: `#systemSelector`/
+  `#planetSelector`'s resolved name text does NOT update when the coordinate
+  boxes are hand-edited (confirmed live), so the name is now only trusted
+  while the boxes still match what the page loaded with — edited-but-unverified
+  falls back to a neutral `(x, y)` label instead of showing a stale, wrong name.
+  See "Bookmark implementation notes" below.
 - **2026-09-20** — Reworked bookmarks to a single, uniform model: every
   bookmark is a galaxy coordinate (`galX`/`galY`, plus `sysX`/`sysY` for a
   position within a system) with an optional resolved name and a note, and
@@ -185,13 +201,23 @@ planner URL. `name` is best-effort, filled in wherever it can be:
 
 - On a system's own page: scraped from the static "Coordinates: (x, y)" text
   (`sysX`/`sysY` are `0,0` — the system's center) plus the page title.
-- On the planner page itself: read from the selected `<option>` text of its
-  `#systemSelector`/`#planetSelector` `<select>` elements, which the page
-  itself pre-resolves whenever the coordinates land on a known place — no
-  regex/scraping needed, just DOM element state. Their placeholder options
-  (`-- System --` / `-- Planet --`) mean nothing resolved, i.e. genuine deep
-  space; `name` is left `null` and the panel falls back to a coordinate label
-  like `Deep Space (-71, -445)`.
+- On the planner page itself: read from `#galX`/`#galY`/`#sysX`/`#sysY` -
+  real `<input type=number>` fields, not URL params (the page never navigates
+  via query string; the bare URL just re-renders whatever plan is currently
+  active, and submitting is a same-URL form POST). These inputs hold the
+  current plan or whatever the user is mid-typing either way, so they're the
+  only reliable source of the current coordinates regardless of how the user
+  got to the page. `name` comes from the selected `<option>` text of
+  `#systemSelector`/`#planetSelector`, but **only when the coordinate inputs
+  still match what the page loaded with** - confirmed live that those selects
+  do NOT reactively re-resolve when the coordinate inputs are hand-edited,
+  they keep showing the previous plan's name, so trusting them unconditionally
+  would silently save/display a wrong name for hand-typed coordinates. Once
+  edited, `name` is left `null` and the panel falls back to a neutral
+  coordinate label like `(-71, -445)` - deliberately not "Deep Space", since an
+  edited-but-unverified coordinate isn't necessarily empty, just unconfirmed.
+  The panel also has `input`/`change` listeners on those same fields so it
+  updates live as the user types, rather than only once at page load.
 
 Bookmark identity is derived, not stored: `bookmarkKey()` computes
 `'c:' + galX,galY,sysX,sysY` from whatever fields a bookmark object has, rather
