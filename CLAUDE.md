@@ -41,6 +41,16 @@ is under active development.
 
 ## Changelog
 
+- **2026-09-20** — Reworked bookmarks to a single, uniform model: every
+  bookmark is a galaxy coordinate (`galX`/`galY`, plus `sysX`/`sysY` for a
+  position within a system) with an optional resolved name and a note, and
+  every bookmark links to the same place — the directed-travel planner
+  (`/members/cockpit/travel/directed.php`). This replaced an earlier two-branch
+  design (named systems linking to their own info page, deep space linking to
+  the planner) after the user pointed out they just want one uniform
+  "coordinate + note" bookmark, for cases like asteroid fields and deep space
+  staging points that don't have their own page. See "Bookmark implementation
+  notes" below.
 - **2026-09-18** — XP/hour + time-to-level tracker, replacing the NPC roster (see
   below). Samples current XP via a background `fetch('/members/')` — works from
   any page, including system pages where this panel lives, since the XP figure
@@ -153,6 +163,43 @@ background samples — `XP_SAMPLE_INTERVAL_MS`). Rate is just
 `(newest.xp - oldest.xp) / hoursBetween` across whatever's left in the window
 after pruning — no smoothing beyond that. A manual "Sample now" button in the
 panel bypasses the throttle for an on-demand reading.
+
+### Bookmark implementation notes
+
+Named systems have a stable info page (`/rules/?Galaxy_Map=&systemID=N`), but
+nothing else does — no page exists for a planet, a station, an asteroid field,
+or an empty point in deep space (confirmed live: `/rules/?Galaxy_Map=&x=..&y=..`
+just falls back to the generic, unfocused galaxy map). What *does* address all
+of those uniformly is the directed-travel planner,
+`/members/cockpit/travel/directed.php`, via
+`travelClass=2&supplied=1&galX={x}&galY={y}&sysX={x}&sysY={y}` query params —
+confirmed this is the exact URL the game's own per-row "Plan Travel" links use
+for every planet/station/asteroid field on a system page, and it's also what a
+raw deep-space coordinate resolves to. Landing on it pre-fills the "Plan
+Directed Travel" form (sector/system/position all resolved) without committing
+anything — you still click "Update Plan" yourself.
+
+So every bookmark is stored and linked the same way regardless of what's
+actually there: `{galX, galY, sysX, sysY, name, note}`, always linking to that
+planner URL. `name` is best-effort, filled in wherever it can be:
+
+- On a system's own page: scraped from the static "Coordinates: (x, y)" text
+  (`sysX`/`sysY` are `0,0` — the system's center) plus the page title.
+- On the planner page itself: read from the selected `<option>` text of its
+  `#systemSelector`/`#planetSelector` `<select>` elements, which the page
+  itself pre-resolves whenever the coordinates land on a known place — no
+  regex/scraping needed, just DOM element state. Their placeholder options
+  (`-- System --` / `-- Planet --`) mean nothing resolved, i.e. genuine deep
+  space; `name` is left `null` and the panel falls back to a coordinate label
+  like `Deep Space (-71, -445)`.
+
+Bookmark identity is derived, not stored: `bookmarkKey()` computes
+`'c:' + galX,galY,sysX,sysY` from whatever fields a bookmark object has, rather
+than reading a persisted `key` field. Bookmarks saved by the original
+systemID-only version (plain `{id, name, note, ...}`, no coordinates) still
+work — `bookmarkKey`/`bookmarkLabel`/`bookmarkUrl` all fall back to an
+`'sys:' + id` identity and the old `/rules/?Galaxy_Map=&systemID=` link for
+those, so there was no need for a storage migration.
 
 ### Prior art — check before building anything new
 

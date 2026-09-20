@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.3.0
-// @description  Bookmark space systems in Star Wars Combine and track XP/hour + time to next level.
+// @version      1.4.0
+// @description  Bookmark any space location in Star Wars Combine - systems, planets, asteroid fields, deep space - and track XP/hour + time to next level.
 // @author       you
 // @match        *://*.swcombine.com/*
 // @grant        GM_setValue
@@ -138,23 +138,96 @@
         return parts.length ? parts.join(' ') : '0m';
     }
 
-    // ---------- current system detection ----------
+    // ---------- current location detection ----------
+    //
+    // Every bookmarkable place in the game - a system's center, a planet, a
+    // station, an asteroid field, or an empty point in deep space - is
+    // addressable the same way: the directed-travel planner at
+    // /members/cockpit/travel/directed.php, pre-filled via
+    // travelClass=2&supplied=1&galX=..&galY=..&sysX=..&sysY=.. query params.
+    // Confirmed live: this is the exact URL the game's own per-row "Plan Travel"
+    // links use for planets/stations/asteroid fields on a system page, and it's
+    // also the only page a raw deep-space coordinate resolves to at all
+    // (/rules/?Galaxy_Map=&x=..&y=.. just falls back to the generic galaxy map).
+    // So bookmarks are always stored and linked the same way - {galX, galY,
+    // sysX, sysY, name} - regardless of what's actually there. name is best-
+    // effort (system/planet name when one resolves, null for empty deep space).
 
-    function detectCurrentSystem() {
+    // Convenience save point 1: a system's own info page, so bookmarking a
+    // named system doesn't require detouring through the travel planner first.
+    function detectSystemPageLocation() {
         var params = new URLSearchParams(location.search);
-        if (!params.has('Galaxy_Map')) return null;
+        if (!params.has('Galaxy_Map') || !params.has('systemID')) return null;
 
-        var id = params.get('systemID');
-        if (!id || !/^\d+$/.test(id)) return null;
+        var titleMatch = document.title.match(/^::System:\s*(.+?)\s*-\s*Star Wars Combine::$/);
+        if (!titleMatch) return null;
 
-        var match = document.title.match(/^::System:\s*(.+?)\s*-\s*Star Wars Combine::$/);
-        if (!match) return null;
+        // Static text on the page, e.g. "Coordinates: (-73, -443)".
+        var coordMatch = (document.body.innerText || '').match(/Coordinates:\s*\((-?\d+),\s*(-?\d+)\)/);
+        if (!coordMatch) return null;
 
-        return { id: id, name: match[1] };
+        return { galX: coordMatch[1], galY: coordMatch[2], sysX: '0', sysY: '0', name: titleMatch[1] };
     }
 
-    function systemUrl(id) {
-        return location.origin + '/rules/?Galaxy_Map=&systemID=' + encodeURIComponent(id);
+    // Convenience save point 2: the travel planner itself, landed on either via
+    // a game "Plan Travel" link (planet/station/asteroid field) or by manually
+    // entering coordinates for empty deep space. Visiting it doesn't commit any
+    // travel - it just opens the form with "Update Plan" one click away.
+    function detectTravelPlannerLocation() {
+        if (location.pathname.indexOf('/members/cockpit/travel/directed.php') === -1) return null;
+
+        var params = new URLSearchParams(location.search);
+        if (params.get('supplied') !== '1') return null;
+
+        var galX = params.get('galX');
+        var galY = params.get('galY');
+        if (!galX || !galY || !/^-?\d+$/.test(galX) || !/^-?\d+$/.test(galY)) return null;
+
+        // #systemSelector / #planetSelector are pre-selected by the page itself
+        // when the coordinates resolve to a known place; their placeholder
+        // options ("-- System --" / "-- Planet --") mean nothing resolved.
+        var systemSel = document.getElementById('systemSelector');
+        var planetSel = document.getElementById('planetSelector');
+        var systemName = systemSel && systemSel.selectedIndex >= 0 ? systemSel.options[systemSel.selectedIndex].text : '';
+        var planetName = planetSel && planetSel.selectedIndex >= 0 ? planetSel.options[planetSel.selectedIndex].text : '';
+        var name = null;
+        if (systemName && systemName.indexOf('--') === -1) {
+            name = (planetName && planetName.indexOf('--') === -1) ? (systemName + ' – ' + planetName) : systemName;
+        }
+
+        return {
+            galX: galX,
+            galY: galY,
+            sysX: params.get('sysX') || '0',
+            sysY: params.get('sysY') || '0',
+            name: name
+        };
+    }
+
+    function detectCurrent() {
+        return detectSystemPageLocation() || detectTravelPlannerLocation();
+    }
+
+    // Derived rather than stored, so bookmarks saved by earlier versions (plain
+    // {id, name, ...}, no coordinates) still get a stable identity and keep
+    // working - they just fall back to linking their old system-page URL.
+    function bookmarkKey(bm) {
+        if (bm.galX != null) return 'c:' + bm.galX + ',' + bm.galY + ',' + (bm.sysX || '0') + ',' + (bm.sysY || '0');
+        return 'sys:' + bm.id;
+    }
+
+    function bookmarkLabel(bm) {
+        if (bm.galX != null) return bm.name || 'Deep Space (' + bm.galX + ', ' + bm.galY + ')';
+        return bm.name;
+    }
+
+    function bookmarkUrl(bm) {
+        if (bm.galX != null) {
+            return location.origin + '/members/cockpit/travel/directed.php?travelClass=2&supplied=1&galX=' +
+                encodeURIComponent(bm.galX) + '&galY=' + encodeURIComponent(bm.galY) +
+                '&sysX=' + encodeURIComponent(bm.sysX || '0') + '&sysY=' + encodeURIComponent(bm.sysY || '0');
+        }
+        return location.origin + '/rules/?Galaxy_Map=&systemID=' + encodeURIComponent(bm.id);
     }
 
     // ---------- styles ----------
@@ -301,23 +374,24 @@
 
     function renderCurrent() {
         currentBox.innerHTML = '';
-        var current = detectCurrentSystem();
+        var current = detectCurrent();
 
         if (!current) {
             var hint = document.createElement('div');
             hint.className = 'swc-bm-hint';
-            hint.textContent = 'Not viewing a system page.';
+            hint.textContent = 'Not on a bookmarkable page.';
             currentBox.appendChild(hint);
             return;
         }
 
         var nameEl = document.createElement('span');
         nameEl.className = 'swc-bm-name';
-        nameEl.textContent = current.name;
+        nameEl.textContent = bookmarkLabel(current);
         currentBox.appendChild(nameEl);
 
         var bookmarks = getBookmarks();
-        var already = bookmarks.some(function (b) { return b.id === current.id; });
+        var currentKey = bookmarkKey(current);
+        var already = bookmarks.some(function (b) { return bookmarkKey(b) === currentKey; });
 
         var btn = document.createElement('button');
         btn.className = 'swc-bm-btn';
@@ -325,10 +399,18 @@
             btn.textContent = 'Saved ✓';
             btn.disabled = true;
         } else {
-            btn.textContent = '★ Save this system';
+            btn.textContent = '★ Save this location';
             btn.addEventListener('click', function () {
                 var list = getBookmarks();
-                list.push({ id: current.id, name: current.name, note: '', addedAt: Date.now() });
+                list.push({
+                    galX: current.galX,
+                    galY: current.galY,
+                    sysX: current.sysX,
+                    sysY: current.sysY,
+                    name: current.name || null,
+                    note: '',
+                    addedAt: Date.now()
+                });
                 saveBookmarks(list);
                 render();
             });
@@ -343,15 +425,16 @@
         if (bookmarks.length === 0) {
             var empty = document.createElement('div');
             empty.className = 'swc-bm-empty';
-            empty.textContent = 'No saved systems yet.';
+            empty.textContent = 'No saved locations yet.';
             list.appendChild(empty);
             return;
         }
 
         bookmarks
             .slice()
-            .sort(function (a, b) { return a.name.localeCompare(b.name); })
+            .sort(function (a, b) { return bookmarkLabel(a).localeCompare(bookmarkLabel(b)); })
             .forEach(function (bm) {
+                var key = bookmarkKey(bm);
                 var li = document.createElement('li');
 
                 var top = document.createElement('div');
@@ -359,8 +442,8 @@
 
                 var link = document.createElement('a');
                 link.className = 'swc-bm-link';
-                link.href = systemUrl(bm.id);
-                link.textContent = bm.name;
+                link.href = bookmarkUrl(bm);
+                link.textContent = bookmarkLabel(bm);
                 top.appendChild(link);
 
                 var remove = document.createElement('button');
@@ -368,7 +451,7 @@
                 remove.textContent = '×';
                 remove.title = 'Remove bookmark';
                 remove.addEventListener('click', function () {
-                    var updated = getBookmarks().filter(function (b) { return b.id !== bm.id; });
+                    var updated = getBookmarks().filter(function (b) { return bookmarkKey(b) !== key; });
                     saveBookmarks(updated);
                     render();
                 });
@@ -383,7 +466,7 @@
                 note.value = bm.note || '';
                 note.addEventListener('change', function () {
                     var updated = getBookmarks();
-                    var target = updated.find(function (b) { return b.id === bm.id; });
+                    var target = updated.find(function (b) { return bookmarkKey(b) === key; });
                     if (target) {
                         target.note = note.value;
                         saveBookmarks(updated);
@@ -400,7 +483,7 @@
     function buildPanel() {
         toggleBtn = document.createElement('button');
         toggleBtn.id = 'swc-bm-toggle';
-        toggleBtn.textContent = '★ Systems';
+        toggleBtn.textContent = '★ Locations';
         document.body.appendChild(toggleBtn);
 
         panel = document.createElement('div');
@@ -408,7 +491,7 @@
 
         var header = document.createElement('div');
         header.id = 'swc-bm-header';
-        header.innerHTML = '<span>★ My Systems</span>';
+        header.innerHTML = '<span>★ My Locations</span>';
         panel.appendChild(header);
 
         currentBox = document.createElement('div');
