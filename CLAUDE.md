@@ -41,6 +41,21 @@ is under active development.
 
 ## Changelog
 
+- **2026-09-20** — Bookmarks now go as deep as the travel planner form does:
+  system (`galX`/`galY`), planet/station/field within it (`sysX`/`sysY`),
+  surface position i.e. roughly "which city" (`surfX`/`surfY`), and a specific
+  ground spot (`groundX`/`groundY`) — e.g. a tavern in a specific city, not
+  just the planet it's on. Driven by the "Destination:" dropdown
+  (`#travelClass`: 2=Space, 1=Atmosphere, 0=Ground), which unlocks one more
+  coordinate pair per level; detection reads exactly as deep as the form is
+  currently showing via `.offsetParent` rather than hardcoding what each
+  `travelClass` value means. At Ground depth, the page's own `<h2>` heading
+  resolves a specific descriptor (a city name, or generic terrain like "Rock
+  Terrain at 0, 0") that's appended to the system/planet name — the only
+  source of that info, since there's no dropdown for it like there is for
+  system/planet. Same staleness rule as before applies at every level: a
+  resolved name is only trusted while the form still matches what it loaded
+  with. See "Bookmark implementation notes" below.
 - **2026-09-20** — Fixed travel-planner location detection: it was reading
   `galX`/`galY`/`sysX`/`sysY` from the URL query string, which only worked for
   the one case of landing on the page via a "Plan Travel" link. The page never
@@ -196,36 +211,58 @@ Directed Travel" form (sector/system/position all resolved) without committing
 anything — you still click "Update Plan" yourself.
 
 So every bookmark is stored and linked the same way regardless of what's
-actually there: `{galX, galY, sysX, sysY, name, note}`, always linking to that
-planner URL. `name` is best-effort, filled in wherever it can be:
+actually there: `{galX, galY, sysX, sysY, surfX?, surfY?, groundX?, groundY?,
+travelClass?, name, note}`, always linking to that planner URL. The last five
+fields are only present when the bookmark goes that deep - `bookmarkKey`/
+`bookmarkLabel`/`bookmarkUrl` all check `bm.surfX != null` / `bm.groundX !=
+null` before including them, so a plain system-level bookmark and a
+city/ground-level one round-trip correctly through the same functions without
+a `kind` discriminator field. `name` is best-effort, filled in wherever it can
+be:
 
 - On a system's own page: scraped from the static "Coordinates: (x, y)" text
   (`sysX`/`sysY` are `0,0` — the system's center) plus the page title.
-- On the planner page itself: read from `#galX`/`#galY`/`#sysX`/`#sysY` -
-  real `<input type=number>` fields, not URL params (the page never navigates
-  via query string; the bare URL just re-renders whatever plan is currently
-  active, and submitting is a same-URL form POST). These inputs hold the
-  current plan or whatever the user is mid-typing either way, so they're the
-  only reliable source of the current coordinates regardless of how the user
-  got to the page. `name` comes from the selected `<option>` text of
-  `#systemSelector`/`#planetSelector`, but **only when the coordinate inputs
-  still match what the page loaded with** - confirmed live that those selects
-  do NOT reactively re-resolve when the coordinate inputs are hand-edited,
-  they keep showing the previous plan's name, so trusting them unconditionally
-  would silently save/display a wrong name for hand-typed coordinates. Once
-  edited, `name` is left `null` and the panel falls back to a neutral
-  coordinate label like `(-71, -445)` - deliberately not "Deep Space", since an
-  edited-but-unverified coordinate isn't necessarily empty, just unconfirmed.
-  The panel also has `input`/`change` listeners on those same fields so it
-  updates live as the user types, rather than only once at page load.
+- On the planner page itself: read from the coordinate `<input type=number>`
+  fields directly (`#galX`/`#galY`/`#sysX`/`#sysY`, and `#surfX`/`#surfY`/
+  `#groundX`/`#groundY` once the "Destination:" dropdown (`#travelClass`:
+  2=Space, 1=Atmosphere, 0=Ground) goes deep enough to show them) rather than
+  URL params - the page never navigates via query string; the bare URL just
+  re-renders whatever plan is currently active, and submitting is a same-URL
+  form POST. These inputs hold the current plan or whatever the user is
+  mid-typing either way, so they're the only reliable source of the current
+  coordinates regardless of how the user got to the page. Depth is read via
+  `.offsetParent !== null` on `#surfX`/`#groundX` (they exist in the DOM at
+  every depth, just hidden until relevant) rather than hardcoding what each
+  `travelClass` value means, so this doesn't need updating if the game adds a
+  fourth level.
 
-Bookmark identity is derived, not stored: `bookmarkKey()` computes
-`'c:' + galX,galY,sysX,sysY` from whatever fields a bookmark object has, rather
-than reading a persisted `key` field. Bookmarks saved by the original
-systemID-only version (plain `{id, name, note, ...}`, no coordinates) still
-work — `bookmarkKey`/`bookmarkLabel`/`bookmarkUrl` all fall back to an
-`'sys:' + id` identity and the old `/rules/?Galaxy_Map=&systemID=` link for
-those, so there was no need for a storage migration.
+  `name` comes from the selected `<option>` text of `#systemSelector`/
+  `#planetSelector` (system + planet/station/field), plus - at Ground depth
+  only - the page's own `<h2 class="fancy">` heading (a resolved descriptor
+  like a city name, or generic terrain like "Rock Terrain at 0, 0" when the
+  spot isn't inside a city; there's no dropdown for this level so the heading
+  is the only source). All of this is trusted **only when the form still
+  matches what the page loaded with** - confirmed live that neither the
+  selects nor the heading reactively re-resolve when the coordinate inputs are
+  hand-edited, they keep showing the previous plan's values at every depth, so
+  trusting them unconditionally would silently save/display a wrong name.
+  Once anything is edited, `name` is left `null` and the panel falls back to a
+  neutral coordinate label like `(-71, -445)` or, with more fields present,
+  `(-73, -443 / 10, 10 / 3, 0)` - deliberately not asserting "Deep Space" or a
+  place name, since an edited-but-unverified coordinate isn't necessarily
+  empty, just unconfirmed. The panel has `input`/`change` listeners on all of
+  these fields (plus `#travelClass` itself, since switching destination type
+  changes what "unedited" even means) so it updates live as the user types or
+  changes depth, rather than only once at page load.
+
+Bookmark identity is derived, not stored: `bookmarkKey()` builds
+`'c:' + galX,galY,sysX,sysY[,surfX,surfY[,groundX,groundY]]` from whatever
+fields a bookmark object has, rather than reading a persisted `key` field.
+Bookmarks saved by the original systemID-only version (plain `{id, name,
+note, ...}`, no coordinates) still work — `bookmarkKey`/`bookmarkLabel`/
+`bookmarkUrl` all fall back to an `'sys:' + id` identity and the old
+`/rules/?Galaxy_Map=&systemID=` link for those, so there was no need for a
+storage migration at any point across these changes.
 
 ### Prior art — check before building anything new
 

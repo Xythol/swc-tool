@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.4.1
+// @version      1.5.0
 // @description  Bookmark any space location in Star Wars Combine - systems, planets, asteroid fields, deep space - and track XP/hour + time to next level.
 // @author       you
 // @match        *://*.swcombine.com/*
@@ -172,16 +172,27 @@
     // Convenience save point 2: the travel planner itself. It never navigates
     // via query string - landing on it bare shows whatever plan is currently
     // active, and "Update Plan" is a same-URL form POST - so the only reliable
-    // source of truth is the live form state: the #galX/#galY/#sysX/#sysY
-    // number inputs, which hold the current plan OR whatever the user is
-    // mid-typing, regardless of how they got to the page. Reading the URL (the
-    // original approach) only worked for the one case of landing via a "Plan
-    // Travel" link and went stale the moment the user edited coordinates by
-    // hand without the URL changing to match.
+    // source of truth is the live form state: the coordinate number inputs,
+    // which hold the current plan OR whatever the user is mid-typing,
+    // regardless of how they got to the page. Reading the URL (the original
+    // approach) only worked for the one case of landing via a "Plan Travel"
+    // link and went stale the moment the user edited coordinates by hand
+    // without the URL changing to match.
+    //
+    // The form goes three levels deep, one pair of inputs each, picked via the
+    // "Destination:" dropdown (#travelClass: 2=Space, 1=Atmosphere, 0=Ground):
+    // galX/galY (system) -> sysX/sysY (planet/station/field within it) ->
+    // surfX/surfY (surface position, i.e. roughly "which city") -> groundX/
+    // groundY (a specific spot on the ground). #surfX etc. exist in the DOM at
+    // every depth but are only shown (and only meaningful) once the dropdown
+    // goes deep enough - .offsetParent lets us read exactly as deep as the
+    // form currently is, rather than hardcoding what each travelClass value
+    // means.
+    //
     // Captured once, the first time the travel planner is detected on a given
     // page load - i.e. before any hand-editing - so we can tell whether the
-    // coordinate boxes still match what the page loaded with (see below).
-    var travelPlannerInitialCoords = null;
+    // form still matches what the page loaded with (see below).
+    var travelPlannerInitialSnapshot = null;
 
     function detectTravelPlannerLocation() {
         if (location.pathname.indexOf('/members/cockpit/travel/directed.php') === -1) return null;
@@ -199,19 +210,31 @@
         var sysX = (sysXEl && sysXEl.value) || '0';
         var sysY = (sysYEl && sysYEl.value) || '0';
 
-        if (travelPlannerInitialCoords === null) {
-            travelPlannerInitialCoords = { galX: galX, galY: galY, sysX: sysX, sysY: sysY };
-        }
-        var unedited = travelPlannerInitialCoords.galX === galX && travelPlannerInitialCoords.galY === galY &&
-            travelPlannerInitialCoords.sysX === sysX && travelPlannerInitialCoords.sysY === sysY;
+        var travelClassEl = document.getElementById('travelClass');
+        var travelClass = travelClassEl ? travelClassEl.value : '2';
 
-        // #systemSelector / #planetSelector are resolved by the page once,
-        // server-side, to match whatever plan it loaded with - confirmed live
-        // that they do NOT reactively re-resolve when the coordinate boxes are
-        // hand-edited, they just keep showing the previous plan's name. So the
-        // resolved name is only trustworthy while unedited; the moment the
-        // boxes differ from what the page loaded with, treat the name as
-        // unknown rather than show a stale, wrong one.
+        var surfXEl = document.getElementById('surfX');
+        var hasSurf = !!(surfXEl && surfXEl.offsetParent !== null);
+        var surfX = hasSurf ? surfXEl.value : null;
+        var surfY = hasSurf ? ((document.getElementById('surfY') || {}).value || '0') : null;
+
+        var groundXEl = document.getElementById('groundX');
+        var hasGround = !!(groundXEl && groundXEl.offsetParent !== null);
+        var groundX = hasGround ? groundXEl.value : null;
+        var groundY = hasGround ? ((document.getElementById('groundY') || {}).value || '0') : null;
+
+        var snapshot = [galX, galY, sysX, sysY, surfX, surfY, groundX, groundY, travelClass].join('|');
+        if (travelPlannerInitialSnapshot === null) travelPlannerInitialSnapshot = snapshot;
+        var unedited = snapshot === travelPlannerInitialSnapshot;
+
+        // #systemSelector / #planetSelector and the page's own <h2> heading are
+        // all resolved once, server-side, to match whatever plan the page
+        // loaded with - confirmed live that none of them reactively re-resolve
+        // when the coordinate boxes are hand-edited, they just keep showing
+        // the previous plan's values. So a resolved name is only trustworthy
+        // while unedited; the moment the form differs from what the page
+        // loaded with, treat the name as unknown rather than show a stale,
+        // wrong one.
         var name = null;
         if (unedited) {
             var systemSel = document.getElementById('systemSelector');
@@ -221,9 +244,22 @@
             if (systemName && systemName.indexOf('--') === -1) {
                 name = (planetName && planetName.indexOf('--') === -1) ? (systemName + ' – ' + planetName) : systemName;
             }
+            // At Ground depth the page's <h2> heading resolves to a specific
+            // local descriptor ("Rock Terrain at 0, 0", or a city name when
+            // the spot is actually inside one) that the selectors above don't
+            // capture - worth appending since it's the only source of that.
+            if (hasGround) {
+                var heading = (document.querySelector('h2.fancy') || {}).textContent;
+                heading = heading ? heading.trim() : '';
+                if (heading) name = name ? (name + ' – ' + heading) : heading;
+            }
         }
 
-        return { galX: galX, galY: galY, sysX: sysX, sysY: sysY, name: name };
+        return {
+            galX: galX, galY: galY, sysX: sysX, sysY: sysY,
+            surfX: surfX, surfY: surfY, groundX: groundX, groundY: groundY,
+            travelClass: travelClass, name: name
+        };
     }
 
     function detectCurrent() {
@@ -231,30 +267,42 @@
     }
 
     // Derived rather than stored, so bookmarks saved by earlier versions (plain
-    // {id, name, ...}, no coordinates) still get a stable identity and keep
-    // working - they just fall back to linking their old system-page URL.
+    // {id, name, ...} or {galX, galY, sysX, sysY, ...} with no surf/ground)
+    // still get a stable identity and keep working, and each bookmark's key
+    // only goes as deep as the fields it actually has.
     function bookmarkKey(bm) {
-        if (bm.galX != null) return 'c:' + bm.galX + ',' + bm.galY + ',' + (bm.sysX || '0') + ',' + (bm.sysY || '0');
-        return 'sys:' + bm.id;
+        if (bm.galX == null) return 'sys:' + bm.id;
+        var parts = [bm.galX, bm.galY, bm.sysX || '0', bm.sysY || '0'];
+        if (bm.surfX != null) parts.push(bm.surfX, bm.surfY || '0');
+        if (bm.groundX != null) parts.push(bm.groundX, bm.groundY || '0');
+        return 'c:' + parts.join(',');
     }
 
     function bookmarkLabel(bm) {
-        // No name doesn't always mean deep space - it can also mean the
+        if (bm.galX == null) return bm.name;
+        if (bm.name) return bm.name;
+        // No name doesn't always mean nothing's there - it can also mean the
         // coordinates were hand-edited and never re-verified (see
         // detectTravelPlannerLocation), so this stays a neutral coordinate
-        // label rather than asserting "Deep Space" for something we're not
-        // actually sure about.
-        if (bm.galX != null) return bm.name || '(' + bm.galX + ', ' + bm.galY + ')';
-        return bm.name;
+        // label rather than asserting e.g. "Deep Space" for something we're
+        // not actually sure about. Each coordinate pair present is shown so
+        // two different unresolved bookmarks in the same system don't look
+        // identical.
+        var parts = [bm.galX + ', ' + bm.galY];
+        if (bm.surfX != null) parts.push(bm.surfX + ', ' + bm.surfY);
+        if (bm.groundX != null) parts.push(bm.groundX + ', ' + bm.groundY);
+        return '(' + parts.join(' / ') + ')';
     }
 
     function bookmarkUrl(bm) {
-        if (bm.galX != null) {
-            return location.origin + '/members/cockpit/travel/directed.php?travelClass=2&supplied=1&galX=' +
-                encodeURIComponent(bm.galX) + '&galY=' + encodeURIComponent(bm.galY) +
-                '&sysX=' + encodeURIComponent(bm.sysX || '0') + '&sysY=' + encodeURIComponent(bm.sysY || '0');
-        }
-        return location.origin + '/rules/?Galaxy_Map=&systemID=' + encodeURIComponent(bm.id);
+        if (bm.galX == null) return location.origin + '/rules/?Galaxy_Map=&systemID=' + encodeURIComponent(bm.id);
+        var url = location.origin + '/members/cockpit/travel/directed.php?travelClass=' +
+            encodeURIComponent(bm.travelClass != null ? bm.travelClass : '2') +
+            '&supplied=1&galX=' + encodeURIComponent(bm.galX) + '&galY=' + encodeURIComponent(bm.galY) +
+            '&sysX=' + encodeURIComponent(bm.sysX || '0') + '&sysY=' + encodeURIComponent(bm.sysY || '0');
+        if (bm.surfX != null) url += '&surfX=' + encodeURIComponent(bm.surfX) + '&surfY=' + encodeURIComponent(bm.surfY || '0');
+        if (bm.groundX != null) url += '&groundX=' + encodeURIComponent(bm.groundX) + '&groundY=' + encodeURIComponent(bm.groundY || '0');
+        return url;
     }
 
     // ---------- styles ----------
@@ -429,7 +477,7 @@
             btn.textContent = '★ Save this location';
             btn.addEventListener('click', function () {
                 var list = getBookmarks();
-                list.push({
+                var bm = {
                     galX: current.galX,
                     galY: current.galY,
                     sysX: current.sysX,
@@ -437,7 +485,21 @@
                     name: current.name || null,
                     note: '',
                     addedAt: Date.now()
-                });
+                };
+                // Only carry fields as deep as detectCurrent() actually found -
+                // detectSystemPageLocation() never sets these, and
+                // detectTravelPlannerLocation() only sets them when the form
+                // is showing that depth (see .offsetParent checks there).
+                if (current.surfX != null) {
+                    bm.surfX = current.surfX;
+                    bm.surfY = current.surfY;
+                }
+                if (current.groundX != null) {
+                    bm.groundX = current.groundX;
+                    bm.groundY = current.groundY;
+                }
+                if (current.travelClass != null) bm.travelClass = current.travelClass;
+                list.push(bm);
                 saveBookmarks(list);
                 render();
             });
@@ -557,7 +619,10 @@
         // detectTravelPlannerLocation), so the panel needs its own listeners to
         // stay in sync as the user edits them, rather than only detecting state
         // once at page load.
-        var TRAVEL_PLANNER_FIELD_IDS = ['galX', 'galY', 'sysX', 'sysY', 'systemSelector', 'planetSelector'];
+        var TRAVEL_PLANNER_FIELD_IDS = [
+            'galX', 'galY', 'sysX', 'sysY', 'surfX', 'surfY', 'groundX', 'groundY',
+            'systemSelector', 'planetSelector', 'travelClass'
+        ];
         document.addEventListener('input', function (e) {
             if (e.target && TRAVEL_PLANNER_FIELD_IDS.indexOf(e.target.id) !== -1) renderCurrent();
         });
