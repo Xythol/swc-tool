@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.5.0
-// @description  Bookmark any space location in Star Wars Combine - systems, planets, asteroid fields, deep space - and track XP/hour + time to next level.
+// @version      1.6.0
+// @description  Bookmark any space location in Star Wars Combine - systems, planets, asteroid fields, deep space - track XP/hour + time to next level, and sync bookmarks across devices via a GitHub Gist.
 // @author       you
 // @match        *://*.swcombine.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
+// @connect      api.github.com
 // @run-at       document-end
 // @noframes
 // @updateURL    https://raw.githubusercontent.com/Xythol/swc-tool/master/swc-system-bookmarks.user.js
@@ -27,6 +29,16 @@
     var XP_WINDOW_MS = 4 * 60 * 60 * 1000; // rate is computed over the last 4 hours of samples
     var XP_MAX_SAMPLES = 200;
 
+    // A single shared Gist holds every device's bookmarks - see "Bookmark sync
+    // implementation notes" in CLAUDE.md for why the ID is safe to hardcode
+    // here (it's not a secret) while the token below never is.
+    var GIST_ID = '158b588abf4c589ce6d42ea831b4a539';
+    var GIST_FILENAME = 'swc-bookmarks.json';
+    var GIST_TOKEN_KEY = 'swc_gist_token';
+    var BOOKMARKS_UPDATED_KEY = 'swc_bookmarks_updated_at';
+    var GIST_LAST_SYNC_KEY = 'swc_gist_last_sync';
+    var GIST_SYNC_INTERVAL_MS = 2 * 60 * 1000; // don't auto-sync more often than this
+
     // ---------- storage ----------
 
     function getBookmarks() {
@@ -39,8 +51,17 @@
         }
     }
 
+    // Every local edit (add/remove/note change) bumps this - it's what sync
+    // compares against the Gist's own updatedAt to decide push vs pull. See
+    // applyRemoteBookmarks() for the pull side, which sets this to the
+    // remote's timestamp instead of "now".
     function saveBookmarks(list) {
         GM_setValue(STORAGE_KEY, JSON.stringify(list));
+        GM_setValue(BOOKMARKS_UPDATED_KEY, Date.now());
+    }
+
+    function getBookmarksUpdatedAt() {
+        return GM_getValue(BOOKMARKS_UPDATED_KEY, 0);
     }
 
     function isPanelOpen() {
@@ -124,6 +145,133 @@
             if (info) recordXPReading(info);
             if (onDone) onDone(!!info);
         });
+    }
+
+    // ---------- bookmark sync (GitHub Gist) ----------
+
+    function getGistToken() {
+        return GM_getValue(GIST_TOKEN_KEY, '');
+    }
+
+    function setGistToken(token) {
+        GM_setValue(GIST_TOKEN_KEY, token);
+    }
+
+    // Pulling from remote sets the local timestamp to the REMOTE's updatedAt
+    // (not Date.now()) so this device's next sync comparison is still correct
+    // - it now matches what's on GitHub, not "just edited locally".
+    function applyRemoteBookmarks(list, remoteUpdatedAt) {
+        GM_setValue(STORAGE_KEY, JSON.stringify(list));
+        GM_setValue(BOOKMARKS_UPDATED_KEY, remoteUpdatedAt);
+    }
+
+    function gistRequest(method, body, onDone) {
+        var token = getGistToken();
+        if (!token) { onDone({ error: 'no-token' }); return; }
+        GM_xmlhttpRequest({
+            method: method,
+            url: 'https://api.github.com/gists/' + GIST_ID,
+            headers: {
+                'Authorization': 'token ' + token,
+                'Accept': 'application/vnd.github+json',
+                'Content-Type': 'application/json'
+            },
+            data: body ? JSON.stringify(body) : undefined,
+            onload: function (res) {
+                if (res.status < 200 || res.status >= 300) {
+                    onDone({ error: 'http-' + res.status });
+                    return;
+                }
+                try {
+                    onDone({ data: JSON.parse(res.responseText) });
+                } catch (e) {
+                    onDone({ error: 'parse' });
+                }
+            },
+            onerror: function () { onDone({ error: 'network' }); },
+            ontimeout: function () { onDone({ error: 'timeout' }); }
+        });
+    }
+
+    function fetchGistData(onDone) {
+        gistRequest('GET', null, function (res) {
+            if (res.error) { onDone(res); return; }
+            var file = res.data.files && res.data.files[GIST_FILENAME];
+            var content = file && file.content ? file.content : '';
+            var parsed;
+            try {
+                parsed = content ? JSON.parse(content) : {};
+            } catch (e) {
+                parsed = {};
+            }
+            onDone({
+                data: {
+                    updatedAt: parsed.updatedAt || 0,
+                    bookmarks: Array.isArray(parsed.bookmarks) ? parsed.bookmarks : []
+                }
+            });
+        });
+    }
+
+    function pushGistData(payload, onDone) {
+        var body = { files: {} };
+        body.files[GIST_FILENAME] = { content: JSON.stringify(payload, null, 2) };
+        gistRequest('PATCH', body, onDone);
+    }
+
+    // Whole-list last-write-wins, compared via a single updatedAt timestamp
+    // rather than per-bookmark merging - deliberately simple, see CLAUDE.md.
+    // If both sides changed since the last sync, whichever has the OLDER
+    // timestamp gets silently overwritten; fine for "edit on one device at a
+    // time", not safe for concurrent editing on two devices at once.
+    function syncBookmarks(onDone) {
+        if (!getGistToken()) { onDone({ error: 'no-token' }); return; }
+        fetchGistData(function (res) {
+            if (res.error) { onDone(res); return; }
+            var remote = res.data;
+            var localUpdated = getBookmarksUpdatedAt();
+            if (remote.updatedAt > localUpdated) {
+                applyRemoteBookmarks(remote.bookmarks, remote.updatedAt);
+                GM_setValue(GIST_LAST_SYNC_KEY, Date.now());
+                onDone({ result: 'pulled' });
+            } else if (localUpdated > remote.updatedAt) {
+                pushGistData({ updatedAt: localUpdated, bookmarks: getBookmarks() }, function (pres) {
+                    if (pres.error) { onDone(pres); return; }
+                    GM_setValue(GIST_LAST_SYNC_KEY, Date.now());
+                    onDone({ result: 'pushed' });
+                });
+            } else {
+                GM_setValue(GIST_LAST_SYNC_KEY, Date.now());
+                onDone({ result: 'up-to-date' });
+            }
+        });
+    }
+
+    function maybeAutoSync(onDone) {
+        if (!getGistToken()) { if (onDone) onDone(null); return; }
+        var last = GM_getValue(GIST_LAST_SYNC_KEY, 0);
+        if (Date.now() - last < GIST_SYNC_INTERVAL_MS) { if (onDone) onDone(null); return; }
+        syncBookmarks(function (res) { if (onDone) onDone(res); });
+    }
+
+    function describeSyncResult(res) {
+        if (!res) return '';
+        if (res.error === 'no-token') return 'Set a token below to enable sync.';
+        if (res.error === 'http-401' || res.error === 'http-403') return 'Sync error: token invalid or missing gist scope.';
+        if (res.error === 'http-404') return 'Sync error: Gist not found.';
+        if (res.error) return 'Sync error: ' + res.error;
+        if (res.result === 'pulled') return 'Pulled newer bookmarks from GitHub.';
+        if (res.result === 'pushed') return 'Pushed local bookmarks to GitHub.';
+        return 'Already up to date.';
+    }
+
+    function formatRelativeTime(ms) {
+        if (!ms) return 'never';
+        var diff = Date.now() - ms;
+        if (diff < 60000) return 'just now';
+        if (diff < 3600000) return Math.round(diff / 60000) + 'm ago';
+        if (diff < 86400000) return Math.round(diff / 3600000) + 'h ago';
+        return Math.round(diff / 86400000) + 'd ago';
     }
 
     function formatDuration(hours) {
@@ -354,6 +502,7 @@
         '}',
         '.swc-bm-empty { padding: 12px; color: #999; font-style: italic; }',
         '#swc-bm-xp { padding: 10px 12px; border-top: 1px solid #3a3f4b; display: flex; flex-direction: column; gap: 4px; }',
+        '#swc-bm-sync { padding: 10px 12px; border-top: 1px solid #3a3f4b; display: flex; flex-direction: column; gap: 4px; }',
         '.swc-bm-row { display: flex; align-items: center; gap: 6px; }',
         '.swc-bm-row .swc-bm-hint { flex: 1; }',
         '.swc-bm-xp-header { font-weight: bold; color: #f2c94c; }',
@@ -361,12 +510,86 @@
 
     // ---------- rendering ----------
 
-    var panel, list, currentBox, toggleBtn, xpBox;
+    var panel, list, currentBox, toggleBtn, xpBox, syncBox;
+    var gistTokenEditing = false;
+    var lastSyncMessage = '';
 
     function render() {
         renderCurrent();
         renderList();
         renderXP();
+        renderSync();
+    }
+
+    function renderSync() {
+        syncBox.innerHTML = '';
+
+        var headerRow = document.createElement('div');
+        headerRow.className = 'swc-bm-row';
+
+        var header = document.createElement('div');
+        header.className = 'swc-bm-xp-header';
+        header.textContent = 'Bookmark Sync';
+        headerRow.appendChild(header);
+
+        var token = getGistToken();
+
+        var syncBtn = document.createElement('button');
+        syncBtn.className = 'swc-bm-btn';
+        syncBtn.textContent = 'Sync now';
+        syncBtn.disabled = !token;
+        syncBtn.addEventListener('click', function () {
+            syncBtn.disabled = true;
+            syncBookmarks(function (res) {
+                lastSyncMessage = describeSyncResult(res);
+                if (res.result === 'pulled') render(); else renderSync();
+            });
+        });
+        headerRow.appendChild(syncBtn);
+        syncBox.appendChild(headerRow);
+
+        if (!token || gistTokenEditing) {
+            var input = document.createElement('input');
+            input.type = 'password';
+            input.className = 'swc-bm-note';
+            input.placeholder = 'GitHub token (gist scope)';
+            syncBox.appendChild(input);
+
+            var saveRow = document.createElement('div');
+            saveRow.className = 'swc-bm-row';
+            var saveBtn = document.createElement('button');
+            saveBtn.className = 'swc-bm-btn';
+            saveBtn.textContent = 'Save token';
+            saveBtn.addEventListener('click', function () {
+                var val = input.value.trim();
+                if (!val) return;
+                setGistToken(val);
+                gistTokenEditing = false;
+                renderSync();
+            });
+            saveRow.appendChild(saveBtn);
+            syncBox.appendChild(saveRow);
+
+            var hint = document.createElement('div');
+            hint.className = 'swc-bm-hint';
+            hint.textContent = 'Stored locally on this device only - paste the same token/gist on every device you want synced.';
+            syncBox.appendChild(hint);
+        } else {
+            var statusLine = document.createElement('div');
+            statusLine.className = 'swc-bm-hint';
+            var lastSync = GM_getValue(GIST_LAST_SYNC_KEY, 0);
+            statusLine.textContent = lastSyncMessage || ('Last synced ' + formatRelativeTime(lastSync));
+            syncBox.appendChild(statusLine);
+
+            var changeBtn = document.createElement('button');
+            changeBtn.className = 'swc-bm-btn';
+            changeBtn.textContent = 'Change token';
+            changeBtn.addEventListener('click', function () {
+                gistTokenEditing = true;
+                renderSync();
+            });
+            syncBox.appendChild(changeBtn);
+        }
     }
 
     function renderXP() {
@@ -569,7 +792,18 @@
 
     // ---------- panel construction ----------
 
+    // Bookmarks saved before this version have no BOOKMARKS_UPDATED_KEY (reads
+    // as 0), which would otherwise look identical to "no local data" and lose
+    // the tie-break against an empty remote Gist on first sync - so treat
+    // "have bookmarks, no recorded timestamp" as "just changed", once.
+    function migrateBookmarksTimestamp() {
+        if (getBookmarksUpdatedAt() === 0 && getBookmarks().length > 0) {
+            GM_setValue(BOOKMARKS_UPDATED_KEY, Date.now());
+        }
+    }
+
     function buildPanel() {
+        migrateBookmarksTimestamp();
         toggleBtn = document.createElement('button');
         toggleBtn.id = 'swc-bm-toggle';
         toggleBtn.textContent = '★ Locations';
@@ -595,6 +829,10 @@
         xpBox.id = 'swc-bm-xp';
         panel.appendChild(xpBox);
 
+        syncBox = document.createElement('div');
+        syncBox.id = 'swc-bm-sync';
+        panel.appendChild(syncBox);
+
         document.body.appendChild(panel);
 
         function applyOpenState(open) {
@@ -612,6 +850,11 @@
         render();
         maybeSampleXP(function (sampled) {
             if (sampled) render();
+        });
+        maybeAutoSync(function (res) {
+            if (!res) return;
+            lastSyncMessage = describeSyncResult(res);
+            if (res.result === 'pulled') render(); else renderSync();
         });
 
         // The travel planner's coordinate inputs/dropdowns change without any

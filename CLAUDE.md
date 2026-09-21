@@ -41,6 +41,22 @@ is under active development.
 
 ## Changelog
 
+- **2026-09-21** — Cross-device bookmark sync via a single shared GitHub Gist
+  (v1.6.0). While designing this, the user pasted a live GitHub PAT directly
+  into chat and asked to hardcode it into the script — refused: the script
+  ships from this **public** repo via raw.githubusercontent.com, so anything
+  in the source is effectively public, and a hardcoded classic PAT would leak
+  write access to the user's whole GitHub account, not just this one gist.
+  That token was flagged for immediate revocation. The Gist **ID** itself
+  (`158b588abf4c589ce6d42ea831b4a539`, https://gist.github.com/Xythol/158b588abf4c589ce6d42ea831b4a539)
+  is hardcoded in the script and that's fine — it's not a secret, it's an
+  address. The **token** is never in source; it's entered once per device
+  through a small settings UI in the panel and stored via `GM_setValue` (same
+  local-only mechanism as everything else), alongside a one-time heads-up
+  that a secret Gist is unlisted, not access-controlled — anyone who ever
+  gets the ID (e.g. by reading this public repo) can read the bookmark data
+  without a token, they just can't write it. See "Bookmark sync implementation
+  notes" below.
 - **2026-09-20** — Bookmarks now go as deep as the travel planner form does:
   system (`galX`/`galY`), planet/station/field within it (`sysX`/`sysY`),
   surface position i.e. roughly "which city" (`surfX`/`surfY`), and a specific
@@ -271,6 +287,48 @@ note, ...}`, no coordinates) still work — `bookmarkKey`/`bookmarkLabel`/
 `bookmarkUrl` all fall back to an `'sys:' + id` identity and the old
 `/rules/?Galaxy_Map=&systemID=` link for those, so there was no need for a
 storage migration at any point across these changes.
+
+### Bookmark sync implementation notes
+
+One shared Gist (ID hardcoded as `GIST_ID`, filename `swc-bookmarks.json`)
+holds bookmarks for every device; the per-device secret is only the GitHub
+token, entered once through the panel's "Bookmark Sync" section and stored
+via `GM_setValue(GIST_TOKEN_KEY, ...)`. Deliberately **not** auto-created by
+the script — see the 2026-09-21 changelog entry for why a normal sync call
+refuses to run without a Gist ID rather than silently creating one (two
+devices auto-creating independently would each get their own Gist and never
+converge).
+
+Sync is whole-list last-write-wins, compared via a single `updatedAt`
+timestamp rather than per-bookmark merging — deliberately the simplest thing
+that works for "edit bookmarks on whichever one device you're playing on,"
+not concurrent multi-device editing:
+
+- `BOOKMARKS_UPDATED_KEY` is bumped to `Date.now()` on every local
+  add/remove/note-edit (inside `saveBookmarks()`), and separately set to the
+  *remote's* `updatedAt` (not `Date.now()`) when pulling (`applyRemoteBookmarks()`)
+  — otherwise a pulled state would immediately look newer than the Gist it
+  just came from, and the next device to sync would re-push what it just
+  received right back.
+- `syncBookmarks()` fetches the Gist, then: remote newer → pull and overwrite
+  local; local newer → push and overwrite remote; equal → no-op. If both
+  sides changed since the last sync, whichever has the older timestamp is
+  silently discarded — a real tradeoff, accepted for simplicity.
+- Pre-existing installs (bookmarks saved before v1.6.0) have no
+  `BOOKMARKS_UPDATED_KEY` at all, which reads as `0` — indistinguishable from
+  "no local data" and would lose every tie-break against a fresh empty Gist.
+  `migrateBookmarksTimestamp()` runs once at panel build: if there are
+  bookmarks but no recorded timestamp, stamp it `Date.now()` so the first
+  sync correctly pushes existing data instead of silently no-op'ing.
+- Auto-sync runs once per panel load, throttled to at most every 2 minutes
+  (`GIST_LAST_SYNC_KEY` / `GIST_SYNC_INTERVAL_MS`) — same pattern as the XP
+  tracker's background sampling. A manual "Sync now" button bypasses the
+  throttle.
+
+Gist API calls use `GM_xmlhttpRequest` (with `@connect api.github.com`), not
+`fetch()` — unlike swcombine.com, api.github.com isn't behind Anubis and isn't
+same-origin with the page, so the Anubis/CORS reasons for preferring `fetch()`
+elsewhere in this script don't apply here.
 
 ### Prior art — check before building anything new
 
