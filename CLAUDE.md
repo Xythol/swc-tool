@@ -41,6 +41,14 @@ is under active development.
 
 ## Changelog
 
+- **2026-09-25** — Replaced auto-sync with explicit Pull/Push (v1.7.0). The
+  v1.6.0 design auto-ran on panel load and picked a direction by comparing
+  timestamps, silently discarding whichever side was older when both had
+  changed — the user asked to control sync direction themselves instead of
+  having it guessed. Now there's no background sync at all: two buttons,
+  "Pull from Gist" (unconditionally overwrites local) and "Push to Gist"
+  (unconditionally overwrites the Gist), each behind an inline confirm step
+  before it runs. See "Bookmark sync implementation notes" below.
 - **2026-09-21** — Cross-device bookmark sync via a single shared GitHub Gist
   (v1.6.0). While designing this, the user pasted a live GitHub PAT directly
   into chat and asked to hardcode it into the script — refused: the script
@@ -299,31 +307,34 @@ refuses to run without a Gist ID rather than silently creating one (two
 devices auto-creating independently would each get their own Gist and never
 converge).
 
-Sync is whole-list last-write-wins, compared via a single `updatedAt`
-timestamp rather than per-bookmark merging — deliberately the simplest thing
-that works for "edit bookmarks on whichever one device you're playing on,"
-not concurrent multi-device editing:
+**As of v1.7.0, sync direction is entirely user-chosen, not auto-resolved.**
+The original v1.6.0 design compared a single `updatedAt` timestamp and
+auto-picked a direction (remote newer → pull, local newer → push), which
+meant that whenever both sides had changed since the last sync, whichever
+had the *older* timestamp was silently discarded with no warning — a real
+correctness risk the user asked to remove rather than accept. There is no
+`syncBookmarks()`/auto-resolve function anymore, and nothing runs on panel
+load: two explicit functions instead, each unconditional and only reachable
+after an inline confirm step in the panel (`pendingSyncAction` state in
+`renderSync()` — click Pull/Push once to arm the confirm, once more to run
+it, or Cancel to back out):
 
-- `BOOKMARKS_UPDATED_KEY` is bumped to `Date.now()` on every local
-  add/remove/note-edit (inside `saveBookmarks()`), and separately set to the
-  *remote's* `updatedAt` (not `Date.now()`) when pulling (`applyRemoteBookmarks()`)
-  — otherwise a pulled state would immediately look newer than the Gist it
-  just came from, and the next device to sync would re-push what it just
-  received right back.
-- `syncBookmarks()` fetches the Gist, then: remote newer → pull and overwrite
-  local; local newer → push and overwrite remote; equal → no-op. If both
-  sides changed since the last sync, whichever has the older timestamp is
-  silently discarded — a real tradeoff, accepted for simplicity.
-- Pre-existing installs (bookmarks saved before v1.6.0) have no
-  `BOOKMARKS_UPDATED_KEY` at all, which reads as `0` — indistinguishable from
-  "no local data" and would lose every tie-break against a fresh empty Gist.
-  `migrateBookmarksTimestamp()` runs once at panel build: if there are
-  bookmarks but no recorded timestamp, stamp it `Date.now()` so the first
-  sync correctly pushes existing data instead of silently no-op'ing.
-- Auto-sync runs once per panel load, throttled to at most every 2 minutes
-  (`GIST_LAST_SYNC_KEY` / `GIST_SYNC_INTERVAL_MS`) — same pattern as the XP
-  tracker's background sampling. A manual "Sync now" button bypasses the
-  throttle.
+- `pullBookmarks()` fetches the Gist and unconditionally overwrites local
+  storage with it via `applyRemoteBookmarks()`, which also stamps
+  `BOOKMARKS_UPDATED_KEY` to the *remote's* `updatedAt` (not `Date.now()`) so
+  the "Local edited" display reflects what's actually on GitHub post-pull.
+- `pushBookmarks()` unconditionally overwrites the Gist with
+  `getBookmarks()`'s current contents, then stamps `BOOKMARKS_UPDATED_KEY` to
+  the push time.
+- `GIST_LAST_SYNC_KEY` is still recorded after either action, purely for the
+  "last synced Xm ago" status line — it no longer gates a throttle, since
+  there's no background sync left to throttle.
+- `BOOKMARKS_UPDATED_KEY` is still bumped on every local add/remove/note-edit
+  (inside `saveBookmarks()`), shown alongside "last synced" so you can see at
+  a glance whether you have local changes that haven't been pushed yet. The
+  old `migrateBookmarksTimestamp()` one-time backfill for pre-v1.6.0 installs
+  was removed along with it — it only existed to avoid a bad auto-resolve
+  tie-break, which no longer exists.
 
 Gist API calls use `GM_xmlhttpRequest` (with `@connect api.github.com`), not
 `fetch()` — unlike swcombine.com, api.github.com isn't behind Anubis and isn't
