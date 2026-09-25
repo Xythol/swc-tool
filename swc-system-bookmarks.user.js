@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SWC Space System Bookmarks
 // @namespace    https://github.com/swc-tool
-// @version      1.7.0
-// @description  Bookmark any space location in Star Wars Combine - systems, planets, asteroid fields, deep space - track XP/hour + time to next level, and manually pull/push bookmarks across devices via a GitHub Gist.
+// @version      1.11.0
+// @description  Bookmark any space location in Star Wars Combine - systems, planets, asteroid fields, deep space - track remaining hyperspace travel time (captured while in the cockpit, ticking locally elsewhere), and manually pull/push bookmarks across devices via a GitHub Gist.
 // @author       you
 // @match        *://*.swcombine.com/*
 // @grant        GM_setValue
@@ -22,12 +22,7 @@
     var STORAGE_KEY = 'swc_system_bookmarks';
     var PANEL_OPEN_KEY = 'swc_panel_open';
 
-    var XP_SAMPLES_KEY = 'swc_xp_samples';
-    var XP_NEXT_KEY = 'swc_xp_next';
-    var XP_LAST_FETCH_KEY = 'swc_xp_last_fetch';
-    var XP_SAMPLE_INTERVAL_MS = 2 * 60 * 1000; // don't background-sample more often than this
-    var XP_WINDOW_MS = 4 * 60 * 60 * 1000; // rate is computed over the last 4 hours of samples
-    var XP_MAX_SAMPLES = 200;
+    var TRAVEL_STATE_KEY = 'swc_travel_state';
 
     // A single shared Gist holds every device's bookmarks - see "Bookmark sync
     // implementation notes" in CLAUDE.md for why the ID is safe to hardcode
@@ -71,79 +66,132 @@
         GM_setValue(PANEL_OPEN_KEY, open);
     }
 
-    // ---------- XP tracking ----------
-
-    // The XP figure only appears in the #menu_CurXP widget on /members/* pages,
-    // not on system pages where this panel actually lives - so instead of
-    // scraping the current page, we fetch /members/ in the background
-    // (same-origin fetch(), which passes Anubis fine - GM_xmlhttpRequest does not,
-    // see CLAUDE.md) and parse the XP out of that response.
-    function fetchCurrentXP(onDone) {
-        fetch(location.origin + '/members/', { credentials: 'include' })
-            .then(function (res) { return res.text(); })
-            .then(function (html) {
-                var doc = new DOMParser().parseFromString(html, 'text/html');
-                var curEl = doc.getElementById('menu_CurXP');
-                if (!curEl) {
-                    onDone(null);
-                    return;
-                }
-                var current = parseInt(curEl.textContent.replace(/,/g, ''), 10);
-                if (isNaN(current)) {
-                    onDone(null);
-                    return;
-                }
-                // The "Next: N" figure is rendered client-side by a Vue component and
-                // isn't in the static DOM, but it IS present as a static attribute on
-                // that component's tag before Vue hydrates it - so pull it from the
-                // raw HTML rather than the parsed document.
-                var next = null;
-                var bars = html.match(/<coloured-status-bar2\b[^>]*>/gi) || [];
-                var xpBar = bars.filter(function (tag) { return /unit="XP"/i.test(tag); })[0];
-                if (xpBar) {
-                    var m = xpBar.match(/title="Next:\s*([\d,]+)"/i);
-                    if (m) next = parseInt(m[1].replace(/,/g, ''), 10);
-                }
-                onDone({ current: current, next: next });
-            })
-            .catch(function () { onDone(null); });
+    // ---------- travel timer ----------
+    //
+    // The cockpit's hyperspace-travel countdown is gated to physically being
+    // in the cockpit room, not just to a URL - confirmed live that visiting
+    // /members/cockpit/ (or the travel planner) while elsewhere on the ship
+    // just redirects to /members/position/ with "You are not in the cockpit.",
+    // and the countdown widget is completely absent from the DOM on every
+    // other page, including /members/ itself. So there is no page to poll
+    // this from once you've left - the only thing available is to capture the
+    // countdown whenever the panel happens to render on a page where it's
+    // actually present, which happens naturally: you have to be in the
+    // cockpit to set travel in the first place. Everywhere else, the panel
+    // just ticks that last captured reading down locally.
+    //
+    // Also confirmed live: the countdown span's data-years/days/hours/
+    // minutes/seconds attributes are a STATIC page-load snapshot - SWC's own
+    // JS only updates the span's displayed text every second, never the
+    // attributes themselves. So re-reading them from an already-loaded page
+    // (e.g. on every tick of the setInterval below) would keep re-capturing
+    // the same stale snapshot with a fresh "now" timestamp, freezing the
+    // display instead of counting down - see the guard in
+    // refreshTravelState() below.
+    //
+    // Detection looks for an element whose full text is exactly "<word>
+    // Travel" with the countdown span (class `countdown_clock`, a generic
+    // countdown widget SWC reuses in several places) as its next sibling's
+    // descendant - rather than hardcoding "Hyperspace Travel", so this should
+    // also pick up Atmosphere/Ground travel if SWC ever shows those the same
+    // way (unverified - see CLAUDE.md). The structural check (next sibling
+    // has the actual span) is load-bearing: an achievements-list entry
+    // literally titled "Hyperspace Travel" and a "Room Travel" nav link both
+    // match the text alone but have no adjacent countdown.
+    function detectLiveTravelCountdown() {
+        if (!document.querySelector('span.countdown_clock[data-hours]')) return null;
+        var candidates = document.querySelectorAll('body *');
+        for (var i = 0; i < candidates.length; i++) {
+            var label = candidates[i];
+            var text = (label.textContent || '').trim().replace(/\s+/g, ' ');
+            if (!/^\w+\s+travel$/i.test(text)) continue;
+            var valueRow = label.nextElementSibling;
+            var span = valueRow ? valueRow.querySelector('span.countdown_clock[data-hours]') : null;
+            if (!span) continue;
+            var seconds =
+                (parseInt(span.getAttribute('data-years'), 10) || 0) * 365 * 86400 +
+                (parseInt(span.getAttribute('data-days'), 10) || 0) * 86400 +
+                (parseInt(span.getAttribute('data-hours'), 10) || 0) * 3600 +
+                (parseInt(span.getAttribute('data-minutes'), 10) || 0) * 60 +
+                (parseInt(span.getAttribute('data-seconds'), 10) || 0);
+            return { label: text, remainingSeconds: seconds };
+        }
+        return null;
     }
 
-    function getXPSamples() {
-        var raw = GM_getValue(XP_SAMPLES_KEY, '[]');
+    // {label, remainingSeconds, fetchedAt} as of the last live capture, or
+    // null if a countdown has never been seen - fetchedAt is what lets the
+    // panel keep ticking the display down locally on pages that can't see
+    // the countdown themselves.
+    function getTravelState() {
         try {
-            var list = JSON.parse(raw);
-            return Array.isArray(list) ? list : [];
+            return JSON.parse(GM_getValue(TRAVEL_STATE_KEY, 'null'));
         } catch (e) {
-            return [];
+            return null;
         }
     }
 
-    function addXPSample(xp) {
-        var samples = getXPSamples();
-        samples.push({ t: Date.now(), xp: xp });
-        var cutoff = Date.now() - XP_WINDOW_MS;
-        samples = samples.filter(function (s) { return s.t >= cutoff; });
-        if (samples.length > XP_MAX_SAMPLES) samples = samples.slice(samples.length - XP_MAX_SAMPLES);
-        GM_setValue(XP_SAMPLES_KEY, JSON.stringify(samples));
+    // The sidebar's "Travel Planner" row reads "Destination Set" whenever a
+    // trip is queued - and unlike the countdown itself, confirmed live that
+    // this is visible on EVERY /members/* page regardless of which room the
+    // character is in (it still read "Destination Set" from the ship
+    // inventory page while away from the cockpit, mid-trip). That makes it a
+    // room-independent way to notice a tracked trip was cancelled (or
+    // completed) without a new one being queued - something the countdown's
+    // absence alone can't tell apart from "not currently on a page that shows
+    // it" (see detectLiveTravelCountdown). The exact "nothing queued" text
+    // hasn't been observed live - that would need an actual cancelled trip to
+    // see - so this treats anything OTHER than exactly "Destination Set" as
+    // no destination queued, rather than matching a guessed off-state string.
+    // Returns null (not false) when the "Travel Planner" row isn't present on
+    // this page at all, so callers don't mistake "can't tell" for "no".
+    function hasQueuedDestination() {
+        var all = document.querySelectorAll('body *');
+        for (var i = 0; i < all.length; i++) {
+            var label = all[i];
+            if (label.textContent.trim().replace(/\s+/g, ' ') !== 'Travel Planner') continue;
+            var value = label.nextElementSibling;
+            return !!value && value.textContent.trim().replace(/\s+/g, ' ') === 'Destination Set';
+        }
+        return null;
     }
 
-    function recordXPReading(info) {
-        addXPSample(info.current);
-        GM_setValue(XP_NEXT_KEY, info.next == null ? '' : String(info.next));
-    }
-
-    function maybeSampleXP(onDone) {
-        var lastFetch = GM_getValue(XP_LAST_FETCH_KEY, 0);
-        if (Date.now() - lastFetch < XP_SAMPLE_INTERVAL_MS) {
-            if (onDone) onDone(false);
+    function refreshTravelState() {
+        var info = detectLiveTravelCountdown();
+        if (info) {
+            var prev = getTravelState();
+            if (prev && prev.label === info.label) {
+                var predicted = prev.remainingSeconds - (Date.now() - prev.fetchedAt) / 1000;
+                // Same trip, and this matches what we'd already predict for
+                // right now - this is the frozen data-* attributes from the
+                // CURRENT page's initial load being read again (see comment
+                // above), not a new server reading, so leave the clock alone.
+                if (Math.abs(info.remainingSeconds - predicted) < 5) return;
+            }
+            GM_setValue(TRAVEL_STATE_KEY, JSON.stringify({ label: info.label, remainingSeconds: info.remainingSeconds, fetchedAt: Date.now() }));
             return;
         }
-        GM_setValue(XP_LAST_FETCH_KEY, Date.now());
-        fetchCurrentXP(function (info) {
-            if (info) recordXPReading(info);
-            if (onDone) onDone(!!info);
-        });
+        // No live countdown on this page. Only worth checking further if we
+        // have something tracked that could need clearing - hasQueuedDestination()
+        // scans the whole page, so skip it entirely once there's nothing to lose.
+        if (getTravelState() && hasQueuedDestination() === false) {
+            GM_setValue(TRAVEL_STATE_KEY, 'null');
+        }
+    }
+
+    function formatCountdown(totalSeconds) {
+        var s = Math.max(0, Math.floor(totalSeconds));
+        var years = Math.floor(s / 31536000); s %= 31536000;
+        var days = Math.floor(s / 86400); s %= 86400;
+        var hours = Math.floor(s / 3600); s %= 3600;
+        var minutes = Math.floor(s / 60); s %= 60;
+        var parts = [];
+        if (years) parts.push(years + 'y');
+        if (years || days) parts.push(days + 'd');
+        if (years || days || hours) parts.push(hours + 'h');
+        parts.push(minutes + 'm');
+        parts.push(s + 's');
+        return parts.join(' ');
     }
 
     // ---------- bookmark sync (GitHub Gist) ----------
@@ -264,17 +312,6 @@
         return Math.round(diff / 86400000) + 'd ago';
     }
 
-    function formatDuration(hours) {
-        var totalMinutes = Math.round(hours * 60);
-        var days = Math.floor(totalMinutes / 1440);
-        var hrs = Math.floor((totalMinutes % 1440) / 60);
-        var mins = totalMinutes % 60;
-        var parts = [];
-        if (days > 0) parts.push(days + 'd');
-        if (hrs > 0) parts.push(hrs + 'h');
-        if (days === 0 && mins > 0) parts.push(mins + 'm');
-        return parts.length ? parts.join(' ') : '0m';
-    }
 
     // ---------- current location detection ----------
     //
@@ -491,16 +528,16 @@
         '  border: 1px solid #3a3f4b; border-radius: 4px; padding: 3px 6px; font-size: 12px;',
         '}',
         '.swc-bm-empty { padding: 12px; color: #999; font-style: italic; }',
-        '#swc-bm-xp { padding: 10px 12px; border-top: 1px solid #3a3f4b; display: flex; flex-direction: column; gap: 4px; }',
+        '#swc-bm-travel { padding: 10px 12px; border-top: 1px solid #3a3f4b; display: flex; flex-direction: column; gap: 4px; }',
         '#swc-bm-sync { padding: 10px 12px; border-top: 1px solid #3a3f4b; display: flex; flex-direction: column; gap: 4px; }',
         '.swc-bm-row { display: flex; align-items: center; gap: 6px; }',
         '.swc-bm-row .swc-bm-hint { flex: 1; }',
-        '.swc-bm-xp-header { font-weight: bold; color: #f2c94c; }',
+        '.swc-bm-section-header { font-weight: bold; color: #f2c94c; }',
     ].join('\n'));
 
     // ---------- rendering ----------
 
-    var panel, list, currentBox, toggleBtn, xpBox, syncBox;
+    var panel, list, currentBox, toggleBtn, syncBox, travelBox;
     var gistTokenEditing = false;
     var lastSyncMessage = '';
     // 'pull' | 'push' | null - set when a direction button is clicked, cleared
@@ -511,8 +548,43 @@
     function render() {
         renderCurrent();
         renderList();
-        renderXP();
+        renderTravel();
         renderSync();
+    }
+
+    function renderTravel() {
+        travelBox.innerHTML = '';
+
+        var header = document.createElement('div');
+        header.className = 'swc-bm-section-header';
+        header.textContent = 'Travel Timer';
+        travelBox.appendChild(header);
+
+        var state = getTravelState();
+        var line = document.createElement('div');
+        line.className = 'swc-bm-hint';
+
+        if (!state) {
+            line.textContent = 'No travel seen yet - open the cockpit once while traveling to start tracking.';
+            travelBox.appendChild(line);
+            return;
+        }
+
+        var elapsed = (Date.now() - state.fetchedAt) / 1000;
+        var remaining = state.remainingSeconds - elapsed;
+        line.textContent = remaining > 0
+            ? state.label + ': ' + formatCountdown(remaining)
+            : 'Should have arrived by now - open the cockpit to confirm.';
+        travelBox.appendChild(line);
+
+        // This is a local estimate wherever the countdown itself isn't
+        // visible on the current page (see the comment above
+        // detectLiveTravelCountdown) - say so, in the same spirit as the
+        // "Local edited / last synced" line in Bookmark Sync.
+        var asOf = document.createElement('div');
+        asOf.className = 'swc-bm-hint';
+        asOf.textContent = 'Last confirmed ' + formatRelativeTime(state.fetchedAt) + '.';
+        travelBox.appendChild(asOf);
     }
 
     function renderSync() {
@@ -522,7 +594,7 @@
         headerRow.className = 'swc-bm-row';
 
         var header = document.createElement('div');
-        header.className = 'swc-bm-xp-header';
+        header.className = 'swc-bm-section-header';
         header.textContent = 'Bookmark Sync';
         headerRow.appendChild(header);
         syncBox.appendChild(headerRow);
@@ -635,84 +707,6 @@
             renderSync();
         });
         syncBox.appendChild(changeBtn);
-    }
-
-    function renderXP() {
-        xpBox.innerHTML = '';
-
-        var headerRow = document.createElement('div');
-        headerRow.className = 'swc-bm-row';
-
-        var header = document.createElement('div');
-        header.className = 'swc-bm-xp-header';
-        header.textContent = 'XP Tracker';
-        headerRow.appendChild(header);
-
-        var sampleBtn = document.createElement('button');
-        sampleBtn.className = 'swc-bm-btn';
-        sampleBtn.textContent = 'Sample now';
-        sampleBtn.addEventListener('click', function () {
-            sampleBtn.disabled = true;
-            fetchCurrentXP(function (info) {
-                sampleBtn.disabled = false;
-                if (info) {
-                    recordXPReading(info);
-                    GM_setValue(XP_LAST_FETCH_KEY, Date.now());
-                }
-                renderXP();
-            });
-        });
-        headerRow.appendChild(sampleBtn);
-        xpBox.appendChild(headerRow);
-
-        var samples = getXPSamples();
-        if (samples.length === 0) {
-            var hint = document.createElement('div');
-            hint.className = 'swc-bm-hint';
-            hint.textContent = 'No data yet — click Sample now, or just keep playing.';
-            xpBox.appendChild(hint);
-            return;
-        }
-
-        var latest = samples[samples.length - 1];
-        var nextRaw = GM_getValue(XP_NEXT_KEY, '');
-        var next = nextRaw ? parseInt(nextRaw, 10) : null;
-
-        var curLine = document.createElement('div');
-        curLine.className = 'swc-bm-hint';
-        curLine.textContent = 'XP: ' + latest.xp.toLocaleString() + (next != null ? ' / ' + next.toLocaleString() : '');
-        xpBox.appendChild(curLine);
-
-        if (samples.length < 2) {
-            var hint2 = document.createElement('div');
-            hint2.className = 'swc-bm-hint';
-            hint2.textContent = 'Rate: gathering data…';
-            xpBox.appendChild(hint2);
-            return;
-        }
-
-        var oldest = samples[0];
-        var hours = (latest.t - oldest.t) / 3600000;
-        var rate = hours > 0 ? (latest.xp - oldest.xp) / hours : 0;
-
-        var rateLine = document.createElement('div');
-        rateLine.className = 'swc-bm-hint';
-        rateLine.textContent = 'XP/hour: ~' + Math.round(rate).toLocaleString();
-        xpBox.appendChild(rateLine);
-
-        if (next != null) {
-            var remaining = next - latest.xp;
-            var etaLine = document.createElement('div');
-            etaLine.className = 'swc-bm-hint';
-            if (remaining <= 0) {
-                etaLine.textContent = 'Ready to level up!';
-            } else if (rate <= 0) {
-                etaLine.textContent = 'Time to next level: unknown (no recent XP gain)';
-            } else {
-                etaLine.textContent = 'Time to next level: ~' + formatDuration(remaining / rate);
-            }
-            xpBox.appendChild(etaLine);
-        }
     }
 
     function renderCurrent() {
@@ -859,9 +853,9 @@
         list.id = 'swc-bm-list';
         panel.appendChild(list);
 
-        xpBox = document.createElement('div');
-        xpBox.id = 'swc-bm-xp';
-        panel.appendChild(xpBox);
+        travelBox = document.createElement('div');
+        travelBox.id = 'swc-bm-travel';
+        panel.appendChild(travelBox);
 
         syncBox = document.createElement('div');
         syncBox.id = 'swc-bm-sync';
@@ -881,10 +875,19 @@
             applyOpenState(open);
         });
 
+        refreshTravelState();
         render();
-        maybeSampleXP(function (sampled) {
-            if (sampled) render();
-        });
+
+        // Ticks the travel timer display down every second, and re-checks the
+        // live DOM each time in case a countdown just appeared (you opened
+        // the cockpit) or changed (a new plan was submitted) - refreshTravelState
+        // itself no-ops when it's just re-reading the same frozen snapshot
+        // from this page's initial load (see its comment), so this doesn't
+        // reset the clock every tick.
+        setInterval(function () {
+            refreshTravelState();
+            renderTravel();
+        }, 1000);
 
         // The travel planner's coordinate inputs/dropdowns change without any
         // navigation (same-page form, no URL update - see
